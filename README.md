@@ -82,7 +82,7 @@ Para agregar ciudades o categorías, editá `server/constants.js`.
 
 ## App para celular (Google Play y App Store)
 
-La misma web se empaqueta con Capacitor. Los proyectos nativos están en `client/android/` y `client/ios/`. Todos los pasos, requisitos de las tiendas y costos están en [STORES.md](STORES.md).
+La misma web se empaqueta con Capacitor. Los proyectos nativos están en `client/android/` y `client/ios/`. Cómo compilar en la Mac: [MAC.md](MAC.md). Requisitos de las tiendas y costos: [STORES.md](STORES.md).
 
 ## Publicarlo en internet
 

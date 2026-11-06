@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { IS_NATIVE_APP } from '../api.js';
 import { useAuth } from '../auth.jsx';
 
 // Botón "Continuar con Google" (Google Identity Services). Solo aparece si el servidor
@@ -20,14 +21,12 @@ function loadGoogleScript() {
   return scriptPromise;
 }
 
-const isNativeApp = () => Boolean(window.Capacitor?.isNativePlatform?.());
-
 export default function GoogleButton({ onDone, text = 'continue_with' }) {
   const { meta, loginWithGoogle } = useAuth();
   const box = useRef(null);
   const [error, setError] = useState('');
   const clientId = meta?.googleClientId;
-  const enabled = Boolean(clientId) && !isNativeApp();
+  const enabled = Boolean(clientId) && !IS_NATIVE_APP;
 
   useEffect(() => {
     if (!enabled) return;

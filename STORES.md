@@ -20,12 +20,11 @@ Las tiendas revisan estas cosas y la app ya las cumple:
 
 > Los textos legales son un borrador. Antes de publicar, que los revise un abogado y poné un correo real en `client/src/pages/Legal.jsx`.
 
-## Antes de compilar: el servidor tiene que estar en internet
+## Servidor
 
-La app no funciona contra `localhost`. Hace falta:
+La app le pide todo al sitio publicado, `https://jessica-riquelme.vercel.app` (constante `PRODUCTION_URL` en `client/src/api.js`). Si algún día cambia el dominio (por ejemplo a `https://pasalo.com.py`), cambiá esa constante o compilá con `VITE_API_URL` y `VITE_PUBLIC_URL` en `client/.env.production`, y publicá una versión nueva de la app.
 
-1. El servidor publicado con HTTPS (por ejemplo `https://pasalo.com.py`), con la variable `PUBLIC_URL=https://pasalo.com.py` para que las fotos salgan con dirección completa.
-2. En `client/`, copiar `.env.example` a `.env.production` y poner esa misma dirección en `VITE_API_URL` y `VITE_PUBLIC_URL`.
+Los pasos concretos para compilar en una Mac están en [MAC.md](MAC.md).
 
 ## Compilar
 

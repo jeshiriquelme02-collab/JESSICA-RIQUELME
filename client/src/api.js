@@ -1,9 +1,14 @@
 const TOKEN_KEY = 'pasalo_token';
 
-// En la web, la API vive en el mismo dominio (''). En la app de celular se
-// configura VITE_API_URL con la dirección pública del servidor.
-export const API_BASE = (import.meta.env.VITE_API_URL ?? '').replace(/\/$/, '');
-export const PUBLIC_URL = (import.meta.env.VITE_PUBLIC_URL ?? API_BASE ?? '').replace(/\/$/, '') || window.location.origin;
+// Dirección del sitio publicado. La app de celular (Capacitor) no tiene servidor propio:
+// le pide todo a este. Se puede cambiar al compilar con VITE_API_URL / VITE_PUBLIC_URL.
+const PRODUCTION_URL = 'https://jessica-riquelme.vercel.app';
+export const IS_NATIVE_APP = typeof window !== 'undefined' && Boolean(window.Capacitor?.isNativePlatform?.());
+
+// En la web la API vive en el mismo dominio (''); en la app, en el sitio publicado.
+export const API_BASE = (import.meta.env.VITE_API_URL || (IS_NATIVE_APP ? PRODUCTION_URL : '')).replace(/\/$/, '');
+// Dirección que se usa en los enlaces para compartir
+export const PUBLIC_URL = (import.meta.env.VITE_PUBLIC_URL || API_BASE || window.location.origin).replace(/\/$/, '');
 
 export function getToken() {
   try {
