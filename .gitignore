@@ -1,13 +1,20 @@
 node_modules/
+dist/
 client/dist/
 server/data/
 server/uploads/
+*.tar.gz
+publication.log
+app.log
+audit.log
+
+# Secretos: nunca en git
 .env
-.env.production
+.env.*
+!.env.example
 
 # Copias de dist dentro de los proyectos nativos (las regenera `npm run app:sync`)
 client/android/app/src/main/assets/public/
 client/ios/App/App/public/
 
 .vercel
-.env*

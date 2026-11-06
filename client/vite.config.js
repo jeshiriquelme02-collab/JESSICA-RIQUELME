@@ -1,7 +1,7 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 
-// En desarrollo, Vite reenvía /api y /uploads al servidor Express (puerto 3001)
+// En desarrollo, Vite reenvía /api y /photos al servidor Express (puerto 3001)
 export default defineConfig({
   plugins: [react()],
   server: {
@@ -13,7 +13,7 @@ export default defineConfig({
     watch: { ignored: ['**/android/**', '**/ios/**'] },
     proxy: {
       '/api': 'http://localhost:3001',
-      '/uploads': 'http://localhost:3001',
+      '/photos': 'http://localhost:3001',
     },
   },
 });

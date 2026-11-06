@@ -7,7 +7,7 @@ La app es la web de `client/` empaquetada con **Capacitor 8**. Los proyectos nat
 | iOS | `client/ios/App/App.xcodeproj` (Swift Package Manager, sin CocoaPods) | `py.com.pasalo.app` |
 | Android | `client/android/` (Gradle) | `py.com.pasalo.app` |
 
-La app no tiene servidor propio: dentro del celular le pide todo a **https://jessica-riquelme.vercel.app** (ver `PRODUCTION_URL` en `client/src/api.js`). No hace falta ningún `.env` para compilar.
+La app no tiene servidor propio: dentro del celular le pide todo a **https://pasalo.kazflow.com** (ver `PRODUCTION_URL` en `client/src/api.js`). No hace falta ningún `.env` para compilar.
 
 ## 1. Preparar la Mac (una sola vez)
 
@@ -59,7 +59,7 @@ Abre Android Studio. Dejá que Gradle sincronice la primera vez (unos minutos). 
 
 ## 5. Qué probar en el celular
 
-- [ ] Abre la portada con artículos (conexión con `jessica-riquelme.vercel.app`).
+- [ ] Abre la portada con artículos (conexión con `pasalo.kazflow.com`).
 - [ ] Registrarse con correo y contraseña, cerrar la app y volver a abrirla: la sesión sigue.
 - [ ] Publicar un artículo **sacando una foto con la cámara** y otro **eligiendo de la galería**.
 - [ ] Botón **WhatsApp** de un artículo y menú **Compartir**: tienen que abrir WhatsApp o el navegador, no quedarse dentro de la app.

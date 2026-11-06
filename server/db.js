@@ -1,27 +1,19 @@
-// Base de datos SQLite vía libsql: un archivo local en desarrollo, o Turso en la nube
-// (gratis) cuando están definidas DB_URL y DB_AUTH_TOKEN.
+// Base de datos SQLite vía libsql, en un archivo. En producción el servidor da
+// DATABASE_URL=file:/data/app.db; en desarrollo se usa server/data/cheropero.db.
 import fs from 'node:fs';
 import path from 'node:path';
+import { createClient } from '@libsql/client';
 
-// En Vercel solo se puede escribir en /tmp
-const DATA_DIR = process.env.VERCEL ? '/tmp' : path.join(import.meta.dirname, 'data');
-const DB_FILE = process.env.DB_FILE || path.join(DATA_DIR, 'cheropero.db');
-export const REMOTE = Boolean(process.env.DB_URL);
+const LOCAL_FILE = path.join(import.meta.dirname, 'data', 'cheropero.db').replace(/\\/g, '/');
+export const DB_URL = process.env.DATABASE_URL || `file:${LOCAL_FILE}`;
 
 // El cliente se crea la primera vez que se usa (sin await al importar el módulo), así
-// un problema de conexión devuelve un error claro en vez de tirar abajo el servidor.
+// un problema con el archivo devuelve un error claro en vez de tirar abajo el servidor.
 let clientPromise = null;
 export function getDb() {
   clientPromise ??= (async () => {
-    // Contra Turso alcanza el cliente "web" (HTTP, sin módulos nativos), ideal para Vercel.
-    // Para el archivo local hace falta el cliente completo.
-    if (REMOTE) {
-      const { createClient } = await import('@libsql/client/web');
-      return createClient({ url: process.env.DB_URL, authToken: process.env.DB_AUTH_TOKEN });
-    }
-    fs.mkdirSync(path.dirname(DB_FILE), { recursive: true });
-    const { createClient } = await import('@libsql/client');
-    return createClient({ url: `file:${DB_FILE.replace(/\\/g, '/')}` });
+    if (DB_URL.startsWith('file:')) fs.mkdirSync(path.dirname(DB_URL.slice('file:'.length)), { recursive: true });
+    return createClient({ url: DB_URL });
   })().catch((err) => {
     clientPromise = null;
     throw err;
@@ -74,6 +66,7 @@ const SCHEMA = `
     user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     created_at TEXT NOT NULL
   );
+  CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
 
   CREATE TABLE IF NOT EXISTS items (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -141,7 +134,8 @@ const SCHEMA = `
 
 async function init() {
   const db = await getDb();
-  if (!REMOTE) await db.execute('PRAGMA journal_mode = WAL');
+  await db.execute('PRAGMA journal_mode = WAL');
+  await db.execute('PRAGMA busy_timeout = 5000');
   await db.executeMultiple(SCHEMA);
 
   // Migraciones para bases creadas antes de que existiera cada columna

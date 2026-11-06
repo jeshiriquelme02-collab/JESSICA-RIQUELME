@@ -1,8 +1,9 @@
 // Carga usuarios y publicaciones de ejemplo. Uso: npm run seed
 // Contraseña de todas las cuentas demo: demo1234
+import './env.js';
 import crypto from 'node:crypto';
-import { get, ready, run, transaction } from './db.js';
-import { storePhotos } from './photos.js';
+import { get, ready, transaction } from './db.js';
+import { storeSeedSvg } from './photos.js';
 
 await ready();
 
@@ -45,12 +46,9 @@ function hashPassword(password) {
   return { hash: crypto.scryptSync(password, salt, 64).toString('hex'), salt };
 }
 
-// Las fotos se suben primero (Cloudinary o disco), después se insertan las filas
+// Las fotos se guardan primero, después se insertan las filas
 const photos = [];
-for (const [, , , , , , , , emoji, from, to] of items) {
-  const [p] = await storePhotos([{ buffer: Buffer.from(svgPhoto(emoji, from, to)), mimetype: 'image/svg+xml' }]);
-  photos.push(p);
-}
+for (const [, , , , , , , , emoji, from, to] of items) photos.push(await storeSeedSvg(svgPhoto(emoji, from, to)));
 
 await transaction(async (tx) => {
   const userIds = [];

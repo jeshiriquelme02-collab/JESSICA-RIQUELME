@@ -1,18 +1,25 @@
 import express from 'express';
+import { rateLimit } from 'express-rate-limit';
+import helmet from 'helmet';
 import { createRemoteJWKSet, jwtVerify } from 'jose';
 import multer from 'multer';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { all, get, ready, REMOTE, run, transaction } from './db.js';
-import { removePhotos, storePhotos, UPLOAD_DIR, USE_CLOUDINARY } from './photos.js';
+import { all, get, ready, run, transaction } from './db.js';
+import { PHOTOS_DIR, PhotoError, removePhotos, storePhotos } from './photos.js';
 import { CATEGORIES, CITIES, CONDITIONS, STATUSES } from './constants.js';
 
-// La app de Express. index.js la arranca en un puerto; en Vercel la usa api/index.js.
-const CLIENT_DIST = path.join(import.meta.dirname, '..', 'client', 'dist');
+// La app de Express. index.js la arranca en process.env.PORT.
+const IS_PROD = process.env.NODE_ENV === 'production';
+
+// Interfaz compilada: dist/ en la raíz (archivo que se publica) o client/dist en local
+const DIST = [path.join(import.meta.dirname, '..', 'dist'), path.join(import.meta.dirname, '..', 'client', 'dist')].find((d) =>
+  fs.existsSync(path.join(d, 'index.html'))
+);
 const PAGE_SIZE = 24;
 const MAX_PHOTOS = 5;
-const MAX_PHOTO_MB = 8;
+const MAX_PHOTO_MB = 10;
 
 const CATEGORY_IDS = new Set(CATEGORIES.map((c) => c.id));
 const CONDITION_IDS = new Set(CONDITIONS.map((c) => c.id));
@@ -23,9 +30,6 @@ const IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
 // Ingreso con Google (opcional): el ID de cliente es público, no es una clave secreta
 const GOOGLE_CLIENT_ID = (process.env.GOOGLE_CLIENT_ID || '').trim();
 const googleKeys = createRemoteJWKSet(new URL('https://www.googleapis.com/oauth2/v3/certs'));
-
-// En Vercel no hay disco: sin estas claves no se puede guardar nada
-const MISSING_CONFIG = process.env.VERCEL ? ['DB_URL', 'DB_AUTH_TOKEN', 'CLOUDINARY_URL'].filter((k) => !process.env[k]) : [];
 
 // ---------------------------------------------------------------- utilidades
 
@@ -41,13 +45,22 @@ const fail = (status, message) => {
 const now = () => new Date().toISOString();
 const sha256 = (s) => crypto.createHash('sha256').update(s).digest('hex');
 
-// Dirección pública del sitio (ej. https://pasalo.com.py). Con ella las fotos locales se
-// devuelven con URL absoluta, necesario para la app de celular.
-const PUBLIC_URL = (process.env.PUBLIC_URL || '').replace(/\/$/, '');
+// Dirección pública del sitio. Con ella las fotos se devuelven con URL absoluta (la app de
+// celular las pide desde otro origen) y se arman las vistas previas al compartir.
+const PUBLIC_URL = (process.env.PUBLIC_URL || (IS_PROD ? 'https://pasalo.kazflow.com' : '')).replace(/\/$/, '');
+const SITE_ORIGIN = PUBLIC_URL ? new URL(PUBLIC_URL).origin : null;
 const photoUrl = (filename) => {
   if (!filename) return null;
-  return /^https?:/.test(filename) ? filename : `${PUBLIC_URL}/uploads/${filename}`;
+  return /^https?:/.test(filename) ? filename : `${PUBLIC_URL}/photos/${filename}`;
 };
+
+// Orígenes de la app de celular (Capacitor): Android usa https://localhost, iPhone capacitor://localhost.
+// La app se autentica con un token en la cabecera Authorization, nunca con la cookie.
+const APP_ORIGINS = new Set(['capacitor://localhost', 'https://localhost']);
+const isAppOrigin = (origin) => APP_ORIGINS.has(origin);
+// En desarrollo la web corre en http://localhost:5173 (Vite) o :3001
+const DEV_ORIGIN = /^http:\/\/(localhost|127\.0\.0\.1):\d+$/;
+const isSiteOrigin = (origin) => Boolean(origin) && (origin === SITE_ORIGIN || (!IS_PROD && DEV_ORIGIN.test(origin)));
 
 function idParam(value) {
   const id = Number(value);
@@ -100,10 +113,38 @@ function verifyPassword(password, salt, hash) {
   return stored.length === candidate.length && crypto.timingSafeEqual(candidate, stored);
 }
 
-async function createSession(userId) {
+// --- sesiones
+//
+// Identificador aleatorio de 32 bytes. En la base solo se guarda su hash SHA-256.
+// En la web viaja en una cookie httpOnly; la app de celular lo recibe en la respuesta.
+const SESSION_DAYS = 30;
+const SESSION_MS = SESSION_DAYS * 24 * 60 * 60 * 1000;
+// El prefijo __Host- obliga al navegador a exigir Secure, Path=/ y ningún dominio
+const COOKIE_NAME = IS_PROD ? '__Host-pasalo' : 'pasalo_session';
+const COOKIE_OPTIONS = { httpOnly: true, secure: IS_PROD, sameSite: 'lax', path: '/' };
+const sessionCutoff = () => new Date(Date.now() - SESSION_MS).toISOString();
+
+async function startSession(req, res, userId) {
   const token = crypto.randomBytes(32).toString('base64url');
+  await run('DELETE FROM sessions WHERE created_at < ?', [sessionCutoff()]);
   await run('INSERT INTO sessions (token_hash, user_id, created_at) VALUES (?, ?, ?)', [sha256(token), userId, now()]);
-  return token;
+  if (isAppOrigin(req.get('origin'))) return token;
+  res.cookie(COOKIE_NAME, token, { ...COOKIE_OPTIONS, maxAge: SESSION_MS });
+  return undefined;
+}
+
+function readCookie(req, name) {
+  for (const part of (req.get('cookie') || '').split(';')) {
+    const i = part.indexOf('=');
+    if (i > 0 && part.slice(0, i).trim() === name) return decodeURIComponent(part.slice(i + 1).trim());
+  }
+  return null;
+}
+
+function sessionToken(req) {
+  const header = req.get('authorization') || '';
+  if (header.startsWith('Bearer ')) return header.slice(7).trim();
+  return readCookie(req, COOKIE_NAME);
 }
 
 // Las primeras cuentas reciben la insignia de Fundador/a para siempre
@@ -115,10 +156,13 @@ const selfUser = (u) => ({ ...publicUser(u), email: u.email, phone: u.phone });
 
 function auth(required) {
   return async (req, res, next) => {
-    const header = req.get('authorization') || '';
-    if (header.startsWith('Bearer ')) {
-      const tokenHash = sha256(header.slice(7));
-      const user = await get('SELECT u.* FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token_hash = ?', [tokenHash]);
+    const token = sessionToken(req);
+    if (token) {
+      const tokenHash = sha256(token);
+      const user = await get(
+        'SELECT u.* FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token_hash = ? AND s.created_at >= ?',
+        [tokenHash, sessionCutoff()]
+      );
       if (user) {
         req.user = user;
         req.tokenHash = tokenHash;
@@ -131,10 +175,11 @@ function auth(required) {
 
 // ---------------------------------------------------------------- fotos
 
-// Las fotos llegan a memoria y después van a Cloudinary o al disco (ver photos.js)
+// Las fotos llegan a memoria y photos.js las verifica y recodifica con sharp.
+// Este filtro es solo un primer descarte rápido: el formato real lo comprueba sharp.
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: MAX_PHOTO_MB * 1024 * 1024, files: MAX_PHOTOS, fields: 20 },
+  limits: { fileSize: MAX_PHOTO_MB * 1024 * 1024, files: MAX_PHOTOS, fields: 20, parts: 30 },
   fileFilter: (req, file, cb) => {
     if (IMAGE_TYPES.has(file.mimetype)) cb(null, true);
     else cb(new HttpError(400, 'Solo se aceptan fotos JPG, PNG o WEBP'));
@@ -213,81 +258,110 @@ async function deleteItemRows(tx, itemId) {
 
 const app = express();
 app.disable('x-powered-by');
-// Detrás del proxy del hosting (Render, Railway, Nginx) para que req.protocol sea https
-app.set('trust proxy', 1);
+// Cloudflare transmite las peticiones por la interfaz local: así req.ip es la IP real del visitante
+app.set('trust proxy', 'loopback');
 
-// Límite de intentos por IP, en memoria. Frena fuerza bruta y spam sin dependencias.
-function rateLimit({ max, windowMs, message }) {
-  const hits = new Map();
-  return (req, res, next) => {
-    const key = req.ip;
-    const t = Date.now();
-    const entry = hits.get(key);
-    if (!entry || t > entry.reset) {
-      hits.set(key, { count: 1, reset: t + windowMs });
-      if (hits.size > 10000) for (const [k, v] of hits) if (t > v.reset) hits.delete(k);
-      return next();
-    }
-    if (++entry.count > max) {
-      res.setHeader('Retry-After', Math.ceil((entry.reset - t) / 1000));
-      return res.status(429).json({ error: message });
-    }
-    next();
-  };
-}
+// Cabeceras de seguridad. La CSP solo permite el propio sitio, más accounts.google.com
+// para el botón "Continuar con Google".
+const GOOGLE_GSI = 'https://accounts.google.com/gsi/';
+app.use(
+  helmet({
+    contentSecurityPolicy: {
+      useDefaults: false,
+      directives: {
+        defaultSrc: ["'self'"],
+        baseUri: ["'self'"],
+        objectSrc: ["'none'"],
+        frameAncestors: ["'none'"],
+        formAction: ["'self'"],
+        scriptSrc: ["'self'", `${GOOGLE_GSI}client`],
+        // El script de Google inyecta etiquetas <style>: sin 'unsafe-inline' el botón se rompe.
+        // Solo afecta a estilos; los scripts siguen limitados al sitio y a Google.
+        styleSrc: ["'self'", "'unsafe-inline'", `${GOOGLE_GSI}style`],
+        imgSrc: ["'self'", 'data:'],
+        fontSrc: ["'self'"],
+        connectSrc: ["'self'", GOOGLE_GSI],
+        frameSrc: [GOOGLE_GSI],
+        manifestSrc: ["'self'"],
+        ...(IS_PROD ? { upgradeInsecureRequests: [] } : {}),
+      },
+    },
+    // El botón de Google abre una ventana emergente que tiene que poder avisarle a la página
+    crossOriginOpenerPolicy: { policy: 'same-origin-allow-popups' },
+    strictTransportSecurity: IS_PROD ? { maxAge: 31536000 } : false,
+  })
+);
+
+// Límites de intentos por IP (en memoria). Frenan la fuerza bruta y el spam.
 const MIN = 60 * 1000;
-const loginLimit = rateLimit({ max: 15, windowMs: 15 * MIN, message: 'Demasiados intentos. Esperá unos minutos y probá de nuevo.' });
-const registerLimit = rateLimit({ max: 5, windowMs: 60 * MIN, message: 'Demasiadas cuentas creadas desde esta conexión. Probá más tarde.' });
-const publishLimit = rateLimit({ max: 30, windowMs: 60 * MIN, message: 'Publicaste muchas cosas seguidas. Esperá un rato.' });
-const reportLimit = rateLimit({ max: 10, windowMs: 60 * MIN, message: 'Demasiadas denuncias seguidas.' });
+const limit = (limitCount, windowMs, error) =>
+  rateLimit({ windowMs, limit: limitCount, standardHeaders: 'draft-8', legacyHeaders: false, message: { error } });
+const loginLimit = limit(10, 15 * MIN, 'Demasiados intentos. Esperá unos minutos y probá de nuevo.');
+const registerLimit = limit(5, 60 * MIN, 'Demasiadas cuentas creadas desde esta conexión. Probá más tarde.');
+const publishLimit = limit(30, 60 * MIN, 'Publicaste muchas cosas seguidas. Esperá un rato.');
+const reportLimit = limit(10, 60 * MIN, 'Demasiadas denuncias seguidas.');
 
-// Estado del servidor. Con ?db=1 también prueba la conexión a la base (sirve para diagnosticar).
+// Control de salud: responde 200 solo si la base de datos está lista
 app.get('/api/health', async (req, res) => {
-  const status = { ok: MISSING_CONFIG.length === 0, db: REMOTE ? 'turso' : 'archivo local', photos: USE_CLOUDINARY ? 'cloudinary' : 'disco' };
-  if (MISSING_CONFIG.length) status.missing = MISSING_CONFIG;
-  if (req.query.db) {
-    try {
-      await ready();
-      status.dbReady = true;
-    } catch (err) {
-      status.ok = false;
-      status.dbError = String(err.message || err).slice(0, 200);
-    }
+  try {
+    await ready();
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('Base de datos no disponible:', err);
+    res.status(503).json({ ok: false });
   }
-  res.status(status.ok ? 200 : 503).json(status);
 });
 
-// Antes de cualquier otro pedido: configuración completa y tablas creadas
+// Antes de cualquier otro pedido: tablas creadas
 app.use(async (req, res, next) => {
-  if (MISSING_CONFIG.length) {
-    return res.status(503).json({ error: `Falta configurar en Vercel: ${MISSING_CONFIG.join(', ')}` });
-  }
   try {
     await ready();
   } catch (err) {
     console.error('No se pudo preparar la base de datos:', err);
-    return res.status(503).json({ error: 'No se pudo conectar con la base de datos. Probá de nuevo en un rato.' });
+    return res.status(503).json({ error: 'El servicio no está disponible. Probá de nuevo en un rato.' });
   }
   next();
 });
 
-// CORS: la app de celular (Capacitor) llama a la API desde su propio origen
-const APP_ORIGINS = new Set(['capacitor://localhost', 'http://localhost', 'https://localhost', PUBLIC_URL].filter(Boolean));
-app.use((req, res, next) => {
-  const origin = req.headers.origin;
-  if (origin && (APP_ORIGINS.has(origin) || /^http:\/\/localhost:\d+$/.test(origin))) {
+// CORS: solo para la app de celular, que llama a la API desde su propio origen (sin cookies)
+app.use('/api', (req, res, next) => {
+  const origin = req.get('origin');
+  if (isAppOrigin(origin)) {
     res.setHeader('Access-Control-Allow-Origin', origin);
-    res.setHeader('Vary', 'Origin');
     res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PATCH,DELETE,OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type');
     res.setHeader('Access-Control-Max-Age', '86400');
   }
+  res.vary('Origin');
   if (req.method === 'OPTIONS') return res.status(204).end();
   next();
 });
 
+// Peticiones que modifican algo: solo desde el propio sitio o desde la app de celular.
+// Protege contra peticiones falsificadas desde otro sitio (CSRF).
+const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
+app.use((req, res, next) => {
+  if (SAFE_METHODS.has(req.method)) return next();
+  const origin = req.get('origin');
+  if (isSiteOrigin(origin) || isAppOrigin(origin)) return next();
+  res.status(403).json({ error: 'Pedido no permitido' });
+});
+
 app.use(express.json({ limit: '100kb' }));
-if (!USE_CLOUDINARY) app.use('/uploads', express.static(UPLOAD_DIR, { maxAge: '7d', index: false }));
+
+// Fotos: nombres aleatorios que nunca cambian, así que se pueden guardar en caché un año.
+// Cross-Origin-Resource-Policy abierto para que la app de celular pueda mostrarlas.
+app.use(
+  '/photos',
+  express.static(PHOTOS_DIR, {
+    index: false,
+    dotfiles: 'deny',
+    maxAge: '365d',
+    immutable: true,
+    setHeaders: (res) => res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin'),
+  }),
+  (req, res) => res.status(404).end()
+);
 
 app.get('/api/meta', async (req, res) => {
   res.json({
@@ -326,7 +400,7 @@ app.post('/api/auth/register', registerLimit, async (req, res) => {
     [name, email, hash, salt, city, phone, now()]
   );
   const user = await get('SELECT * FROM users WHERE id = ?', [result.lastInsertRowid]);
-  res.status(201).json({ token: await createSession(user.id), user: selfUser(user) });
+  res.status(201).json({ token: await startSession(req, res, user.id), user: selfUser(user) });
 });
 
 app.post('/api/auth/login', loginLimit, async (req, res) => {
@@ -337,7 +411,7 @@ app.post('/api/auth/login', loginLimit, async (req, res) => {
   if (!user || !verifyPassword(password, user.password_salt, user.password_hash)) {
     fail(401, 'Email o contraseña incorrectos');
   }
-  res.json({ token: await createSession(user.id), user: selfUser(user) });
+  res.json({ token: await startSession(req, res, user.id), user: selfUser(user) });
 });
 
 // "Continuar con Google": el navegador recibe de Google una credencial firmada (JWT) y
@@ -374,16 +448,20 @@ app.post('/api/auth/google', loginLimit, async (req, res) => {
     user = await get('SELECT * FROM users WHERE id = ?', [result.lastInsertRowid]);
     created = true;
   }
-  res.status(created ? 201 : 200).json({ token: await createSession(user.id), user: selfUser(user), created });
+  res.status(created ? 201 : 200).json({ token: await startSession(req, res, user.id), user: selfUser(user), created });
 });
 
-app.post('/api/auth/logout', auth(true), async (req, res) => {
-  await run('DELETE FROM sessions WHERE token_hash = ?', [req.tokenHash]);
+// Cierra la sesión en el servidor (el identificador deja de servir) y borra la cookie
+app.post('/api/auth/logout', auth(false), async (req, res) => {
+  if (req.tokenHash) await run('DELETE FROM sessions WHERE token_hash = ?', [req.tokenHash]);
+  res.clearCookie(COOKIE_NAME, COOKIE_OPTIONS);
   res.status(204).end();
 });
 
-app.get('/api/auth/me', auth(true), (req, res) => {
-  res.json({ user: selfUser(req.user) });
+// Sin sesión responde { user: null } (en la web la cookie no se puede leer desde JavaScript)
+app.get('/api/auth/me', auth(false), (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  res.json({ user: req.user ? selfUser(req.user) : null });
 });
 
 // Borrar la cuenta y todo lo asociado (lo exigen Google Play y App Store)
@@ -401,6 +479,7 @@ app.delete('/api/me', auth(true), async (req, res) => {
     await tx.run('DELETE FROM users WHERE id = ?', [uid]);
   });
   await removePhotos(photos);
+  res.clearCookie(COOKIE_NAME, COOKIE_OPTIONS);
   res.status(204).end();
 });
 
@@ -701,41 +780,33 @@ app.post('/api/conversations/:id/messages', auth(true), async (req, res) => {
 
 app.use('/api', (req, res) => res.status(404).json({ error: 'Ruta no encontrada' }));
 
-// --- frontend compilado (modo producción: npm run build && npm start)
+// --- interfaz compilada (dist/ de Vite)
 //
-// La página base (index.html) sale del build local, o en Vercel Services del servicio
-// "client", cuya dirección interna Vercel inyecta en CLIENT_URL (binding en vercel.json).
+// Los archivos de assets/ llevan un hash en el nombre: caché de un año. index.html nunca
+// se guarda en caché, para que cada publicación llegue enseguida.
 
-const HAS_DIST = fs.existsSync(CLIENT_DIST);
-const CLIENT_URL = process.env.CLIENT_URL;
-let indexHtmlCache = null;
-
-async function indexHtml() {
-  if (indexHtmlCache) return indexHtmlCache;
-  if (HAS_DIST) {
-    indexHtmlCache = fs.readFileSync(path.join(CLIENT_DIST, 'index.html'), 'utf8');
-  } else {
-    const base = CLIENT_URL.endsWith('/') ? CLIENT_URL : `${CLIENT_URL}/`;
-    const r = await fetch(new URL('index.html', base));
-    if (!r.ok) throw new Error(`No se pudo leer index.html del servicio client (HTTP ${r.status})`);
-    indexHtmlCache = await r.text();
-  }
-  return indexHtmlCache;
-}
-
-if (HAS_DIST) app.use(express.static(CLIENT_DIST, { index: false }));
-
-if (HAS_DIST || CLIENT_URL) {
+if (DIST) {
+  const indexHtml = fs.readFileSync(path.join(DIST, 'index.html'), 'utf8');
+  const sendIndex = (res, html = indexHtml) => res.setHeader('Cache-Control', 'no-cache').type('html').send(html);
   const escapeHtml = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+
+  app.use(
+    express.static(DIST, {
+      index: false,
+      dotfiles: 'deny',
+      setHeaders: (res, file) => {
+        if (file.includes(`${path.sep}assets${path.sep}`)) res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+      },
+    })
+  );
 
   // Vista previa (Open Graph) cuando se comparte un artículo en WhatsApp, Facebook, etc.
   app.get('/articulo/:id', async (req, res) => {
     const id = parseInt(req.params.id, 10);
     const item = id > 0 ? await get('SELECT id, title, price, description FROM items WHERE id = ?', [id]) : null;
-    const html = await indexHtml();
-    if (!item) return res.type('html').send(html);
+    if (!item) return sendIndex(res);
     const cover = await get('SELECT filename FROM item_photos WHERE item_id = ? ORDER BY position LIMIT 1', [id]);
-    const base = `${req.protocol}://${req.get('host')}`;
+    const base = PUBLIC_URL || `${req.protocol}://${req.get('host')}`;
     const image = cover ? photoUrl(cover.filename) : null;
     const description = (item.description || 'Mirá esta publicación en PasalO.').slice(0, 160);
     const tags = [
@@ -749,21 +820,23 @@ if (HAS_DIST || CLIENT_URL) {
     ]
       .filter(Boolean)
       .join('\n    ');
-    res.type('html').send(html.replace('</head>', `    ${tags}\n  </head>`));
+    sendIndex(res, indexHtml.replace('</head>', `    ${tags}\n  </head>`));
   });
-}
 
-if (HAS_DIST) {
+  // Cualquier otra dirección devuelve index.html: React Router decide qué mostrar
   app.use((req, res, next) => {
-    if (req.method !== 'GET' || req.path.startsWith('/uploads')) return next();
-    res.sendFile(path.join(CLIENT_DIST, 'index.html'));
+    if (req.method !== 'GET' && req.method !== 'HEAD') return next();
+    sendIndex(res);
   });
 }
 
 // --- errores
+//
+// Al visitante solo le llega un mensaje genérico; el detalle queda en el registro del servidor.
 
 app.use((err, req, res, next) => {
   if (err instanceof HttpError) return res.status(err.status).json({ error: err.message });
+  if (err instanceof PhotoError) return res.status(400).json({ error: err.message });
   if (err instanceof multer.MulterError) {
     const messages = {
       LIMIT_FILE_SIZE: `Cada foto puede pesar hasta ${MAX_PHOTO_MB} MB`,
@@ -772,7 +845,8 @@ app.use((err, req, res, next) => {
     };
     return res.status(400).json({ error: messages[err.code] ?? 'No se pudieron subir las fotos' });
   }
-  if (err.type === 'entity.parse.failed') return res.status(400).json({ error: 'Datos inválidos' });
+  if (err.type === 'entity.too.large') return res.status(413).json({ error: 'Datos demasiado grandes' });
+  if (err.type === 'entity.parse.failed' || (err.status >= 400 && err.status < 500)) return res.status(400).json({ error: 'Datos inválidos' });
   console.error(err);
   res.status(500).json({ error: 'Error interno del servidor' });
 });

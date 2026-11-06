@@ -1,51 +1,56 @@
-// Guardado de fotos: en Cloudinary (gratis, con compresión automática) cuando está
-// definida CLOUDINARY_URL; si no, en el disco local (UPLOAD_DIR).
+// Fotos en el disco del servidor. Cada foto pasa por sharp: se comprueba el formato real
+// (no la extensión ni el tipo que declara el navegador), se gira según la orientación de
+// la cámara, se achica a 1600 px como máximo y se recodifica en WebP. Al recodificar se
+// descartan todos los metadatos (EXIF, incluida la ubicación GPS).
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { v2 as cloudinary } from 'cloudinary';
+import sharp from 'sharp';
 
-// En Vercel solo se puede escribir en /tmp (y se borra): allá siempre hay que usar Cloudinary
-export const UPLOAD_DIR = process.env.UPLOAD_DIR || (process.env.VERCEL ? '/tmp/uploads' : path.join(import.meta.dirname, 'uploads'));
-export const USE_CLOUDINARY = Boolean(process.env.CLOUDINARY_URL);
+export const PHOTOS_DIR = process.env.PHOTOS_DIR || path.join(import.meta.dirname, 'uploads');
+fs.mkdirSync(PHOTOS_DIR, { recursive: true });
 
-const EXT = { 'image/jpeg': '.jpg', 'image/png': '.png', 'image/webp': '.webp', 'image/svg+xml': '.svg' };
+// Una sola foto a la vez: el servidor tiene 1 procesador y 768 MB
+sharp.concurrency(1);
+sharp.cache(false);
 
-if (USE_CLOUDINARY) cloudinary.config({ secure: true });
-else fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+const ACCEPTED_FORMATS = new Set(['jpeg', 'png', 'webp']);
+const MAX_SIDE = 1600;
+const MAX_PIXELS = 40_000_000; // ~ foto de 40 megapíxeles
 
-function uploadToCloudinary(buffer) {
-  return new Promise((resolve, reject) => {
-    const stream = cloudinary.uploader.upload_stream(
-      {
-        folder: 'pasalo',
-        resource_type: 'image',
-        // Nunca más de 1600 px por lado: alcanza de sobra para celulares y ahorra cuota
-        transformation: [{ width: 1600, height: 1600, crop: 'limit' }],
-      },
-      (err, result) => (err ? reject(err) : resolve(result))
-    );
-    stream.end(buffer);
-  });
+export class PhotoError extends Error {}
+
+async function toWebp(buffer) {
+  let format;
+  try {
+    ({ format } = await sharp(buffer, { limitInputPixels: MAX_PIXELS }).metadata());
+  } catch {
+    throw new PhotoError('Una de las fotos no se pudo leer. Probá con otra.');
+  }
+  if (!ACCEPTED_FORMATS.has(format)) throw new PhotoError('Solo se aceptan fotos JPG, PNG o WEBP');
+  try {
+    return await sharp(buffer, { limitInputPixels: MAX_PIXELS })
+      .rotate()
+      .resize(MAX_SIDE, MAX_SIDE, { fit: 'inside', withoutEnlargement: true })
+      .webp({ quality: 80 })
+      .toBuffer();
+  } catch {
+    throw new PhotoError('Una de las fotos no se pudo procesar. Probá con otra.');
+  }
 }
 
-// Recibe [{ buffer, mimetype }] y devuelve [{ filename, publicId }].
-// `filename` es un nombre local o una URL completa, según dónde se guardó.
+// Guarda un archivo con un nombre aleatorio (nunca el nombre que mandó el navegador)
+async function saveFile(buffer, ext) {
+  const filename = crypto.randomBytes(16).toString('hex') + ext;
+  await fs.promises.writeFile(path.join(PHOTOS_DIR, filename), buffer, { flag: 'wx' });
+  return { filename, publicId: '' };
+}
+
+// Recibe [{ buffer }] (de multer) y devuelve [{ filename, publicId }].
 export async function storePhotos(files) {
   const stored = [];
   try {
-    for (const f of files) {
-      if (USE_CLOUDINARY) {
-        const r = await uploadToCloudinary(f.buffer);
-        // Entregar siempre en el mejor formato y calidad que soporte el navegador
-        const url = cloudinary.url(r.public_id, { secure: true, fetch_format: 'auto', quality: 'auto' });
-        stored.push({ filename: url, publicId: r.public_id });
-      } else {
-        const filename = crypto.randomUUID() + (EXT[f.mimetype] ?? '.jpg');
-        await fs.promises.writeFile(path.join(UPLOAD_DIR, filename), f.buffer);
-        stored.push({ filename, publicId: '' });
-      }
-    }
+    for (const f of files) stored.push(await saveFile(await toWebp(f.buffer), '.webp'));
     return stored;
   } catch (err) {
     await removePhotos(stored);
@@ -53,16 +58,15 @@ export async function storePhotos(files) {
   }
 }
 
-// Recibe filas con { filename, public_id } o { filename, publicId }
+// Solo para los datos de ejemplo (npm run seed): guarda un SVG generado por el propio código
+export const storeSeedSvg = (svg) => saveFile(Buffer.from(svg), '.svg');
+
+// Recibe filas con { filename }. Las URL completas son fotos viejas de Cloudinary: se ignoran.
 export async function removePhotos(photos) {
   for (const p of photos) {
-    const publicId = p.publicId ?? p.public_id;
+    if (!p.filename || /^https?:/.test(p.filename)) continue;
     try {
-      // invalidate: que la foto deje de verse ya, sin esperar a que venza la caché de Cloudinary
-      if (publicId) await cloudinary.uploader.destroy(publicId, { invalidate: true });
-      else if (p.filename && !/^https?:/.test(p.filename)) {
-        await fs.promises.rm(path.join(UPLOAD_DIR, path.basename(p.filename)), { force: true });
-      }
+      await fs.promises.rm(path.join(PHOTOS_DIR, path.basename(p.filename)), { force: true });
     } catch {
       /* una foto huérfana no es grave */
     }

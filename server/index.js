@@ -1,10 +1,12 @@
-// Arranca el servidor en un puerto (desarrollo, Docker, Render, Railway, VPS).
+// Arranca el servidor. env.js va primero: carga .env.production antes de que app.js lea las variables.
+import './env.js';
 import app from './app.js';
-import { USE_CLOUDINARY } from './photos.js';
+import { DB_URL } from './db.js';
+import { PHOTOS_DIR } from './photos.js';
 
-const PORT = Number(process.env.PORT) || 3001;
+const PORT = process.env.PORT || 3001;
 
 app.listen(PORT, () => {
-  console.log(`API de PasalO escuchando en http://localhost:${PORT}`);
-  console.log(`Base de datos: ${process.env.DB_URL ? 'Turso' : 'archivo local'} · Fotos: ${USE_CLOUDINARY ? 'Cloudinary' : 'disco local'}`);
+  console.log(`PasalO escuchando en el puerto ${PORT}`);
+  console.log(`Base de datos: ${DB_URL} · Fotos: ${PHOTOS_DIR}`);
 });

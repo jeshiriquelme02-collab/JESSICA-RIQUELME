@@ -22,7 +22,7 @@ Las tiendas revisan estas cosas y la app ya las cumple:
 
 ## Servidor
 
-La app le pide todo al sitio publicado, `https://jessica-riquelme.vercel.app` (constante `PRODUCTION_URL` en `client/src/api.js`). Si algún día cambia el dominio (por ejemplo a `https://pasalo.com.py`), cambiá esa constante o compilá con `VITE_API_URL` y `VITE_PUBLIC_URL` en `client/.env.production`, y publicá una versión nueva de la app.
+La app le pide todo al sitio publicado, `https://pasalo.kazflow.com` (constante `PRODUCTION_URL` en `client/src/api.js`). Si algún día cambia el dominio (por ejemplo a `https://pasalo.com.py`), cambiá esa constante o compilá con `VITE_API_URL` y `VITE_PUBLIC_URL` en `client/.env.production`, y publicá una versión nueva de la app.
 
 Los pasos concretos para compilar en una Mac están en [MAC.md](MAC.md).
 

@@ -1,20 +1,6 @@
 {
-  "name": "che-ropero-server",
+  "name": "pasalo-server",
   "private": true,
   "type": "module",
-  "engines": {
-    "node": ">=22.13"
-  },
-  "scripts": {
-    "dev": "node --disable-warning=ExperimentalWarning --watch index.js",
-    "start": "node --disable-warning=ExperimentalWarning index.js",
-    "seed": "node --disable-warning=ExperimentalWarning seed.js"
-  },
-  "dependencies": {
-    "@libsql/client": "^0.18.0",
-    "cloudinary": "^2.11.0",
-    "express": "^5.1.0",
-    "jose": "^6.2.15",
-    "multer": "^2.0.2"
-  }
+  "description": "Solo marca los archivos de esta carpeta como módulos ES. Las dependencias están en el package.json de la raíz."
 }

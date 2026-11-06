@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useState } from 'react';
 import { Navigate, useLocation } from 'react-router-dom';
-import { api, getToken, setToken } from './api.js';
+import { api, getToken, IS_NATIVE_APP, setToken } from './api.js';
 
 const AuthContext = createContext(null);
 
@@ -12,18 +12,21 @@ export function AuthProvider({ children }) {
 
   useEffect(() => {
     api('/meta').then(setMeta).catch(() => {});
-    if (!getToken()) {
+    // En la app sin token no hay sesión; en la web la cookie la decide el servidor
+    if (IS_NATIVE_APP && !getToken()) {
       setReady(true);
       return;
     }
     api('/auth/me')
-      .then((d) => setUser(d.user))
+      .then((d) => {
+        setUser(d.user);
+        if (!d.user) setToken(null);
+      })
       .catch(() => setToken(null))
       .finally(() => setReady(true));
   }, []);
 
   const refreshUnread = useCallback(() => {
-    if (!getToken()) return;
     api('/me/unread')
       .then((d) => setUnread(d.count))
       .catch(() => {});

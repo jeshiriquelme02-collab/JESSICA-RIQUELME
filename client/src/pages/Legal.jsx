@@ -67,7 +67,7 @@ export function Privacy() {
       <ul>
         <li><strong>Cuenta:</strong> nombre, email, ciudad, contraseña (cifrada, nunca en texto plano) y, si lo cargás, tu número de celular.</li>
         <li><strong>Si entrás con Google:</strong> Google nos comparte solo tu nombre, tu correo y un identificador de tu cuenta. No vemos tu contraseña de Google ni nada más de tu cuenta.</li>
-        <li><strong>Publicaciones:</strong> fotos, títulos, descripciones, precios y estado de tus artículos.</li>
+        <li><strong>Publicaciones:</strong> fotos, títulos, descripciones, precios y estado de tus artículos. Al subir una foto le borramos los datos ocultos que agrega el celular, como el lugar donde se sacó.</li>
         <li><strong>Actividad:</strong> favoritos, mensajes con otros usuarios y denuncias.</li>
         <li><strong>Técnicos:</strong> datos mínimos para que el servicio funcione, como la sesión iniciada.</li>
       </ul>
