@@ -28,7 +28,10 @@ function stop(msg) {
   process.exit(1);
 }
 function sh(cmd, args, opts = {}) {
-  const r = spawnSync(cmd, args, { cwd: ROOT, stdio: 'inherit', shell: cmd.startsWith('npm'), ...opts });
+  // npm.cmd necesita una shell en Windows: se le pasa una sola línea (los argumentos son fijos, de este archivo)
+  const r = cmd.startsWith('npm')
+    ? spawnSync([cmd, ...args].join(' '), { cwd: ROOT, stdio: 'inherit', shell: true, ...opts })
+    : spawnSync(cmd, args, { cwd: ROOT, stdio: 'inherit', ...opts });
   if (r.status !== 0) stop(`Falló: ${cmd} ${args.join(' ')}`);
 }
 const npm = WIN ? 'npm.cmd' : 'npm';
