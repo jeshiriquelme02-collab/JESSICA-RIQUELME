@@ -1,0 +1,17 @@
+{
+  "name": "che-ropero-server",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "dev": "node --disable-warning=ExperimentalWarning --watch index.js",
+    "start": "node --disable-warning=ExperimentalWarning index.js",
+    "seed": "node --disable-warning=ExperimentalWarning seed.js"
+  },
+  "dependencies": {
+    "express": "^5.1.0",
+    "multer": "^2.0.2"
+  }
+}

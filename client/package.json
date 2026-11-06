@@ -1,0 +1,30 @@
+{
+  "name": "pasalo-client",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "icons": "node scripts/make-icons.mjs && capacitor-assets generate --android --ios --iconBackgroundColor #f7f5f0 --iconBackgroundColorDark #0f0e0c --splashBackgroundColor #f7f5f0 --splashBackgroundColorDark #0f0e0c",
+    "app:sync": "vite build && cap sync",
+    "app:android": "npm run app:sync && cap open android",
+    "app:ios": "npm run app:sync && cap open ios"
+  },
+  "dependencies": {
+    "@capacitor/android": "^8.6.0",
+    "@capacitor/core": "^8.6.0",
+    "@capacitor/ios": "^8.6.0",
+    "lucide-react": "^1.67.0",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "react-router-dom": "^7.6.0"
+  },
+  "devDependencies": {
+    "@capacitor/assets": "^4.0.0",
+    "@capacitor/cli": "^8.6.0",
+    "@vitejs/plugin-react": "^5.0.0",
+    "sharp": "^0.35.5",
+    "vite": "^7.0.0"
+  }
+}

@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">PasalO</string>
+    <string name="title_activity_main">PasalO</string>
+    <string name="package_name">py.com.pasalo.app</string>
+    <string name="custom_url_scheme">py.com.pasalo.app</string>
+</resources>

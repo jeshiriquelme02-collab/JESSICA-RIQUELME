@@ -1,0 +1,10 @@
+node_modules/
+client/dist/
+server/data/
+server/uploads/
+.env
+.env.production
+
+# Copias de dist dentro de los proyectos nativos (las regenera `npm run app:sync`)
+client/android/app/src/main/assets/public/
+client/ios/App/App/public/
