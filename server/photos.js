@@ -58,7 +58,8 @@ export async function removePhotos(photos) {
   for (const p of photos) {
     const publicId = p.publicId ?? p.public_id;
     try {
-      if (publicId) await cloudinary.uploader.destroy(publicId);
+      // invalidate: que la foto deje de verse ya, sin esperar a que venza la caché de Cloudinary
+      if (publicId) await cloudinary.uploader.destroy(publicId, { invalidate: true });
       else if (p.filename && !/^https?:/.test(p.filename)) {
         await fs.promises.rm(path.join(UPLOAD_DIR, path.basename(p.filename)), { force: true });
       }
