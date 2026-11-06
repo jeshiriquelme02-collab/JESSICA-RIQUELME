@@ -2,7 +2,14 @@
 
 ## Opción recomendada: Vercel (gratis, sin tarjeta)
 
-Vercel corre la página y la API (`vercel.json` + `api/index.js`); la base va en **Turso** y las fotos en **Cloudinary** (ver pasos 1 y 2 más abajo para crear esas dos cuentas).
+El proyecto usa [Vercel Services](https://vercel.com/docs/services) (`vercel.json`): dos servicios en un mismo dominio.
+
+| Servicio | Carpeta | Público en | Qué hace |
+| --- | --- | --- | --- |
+| `client` | `client/` (Vite) | todo lo demás (`/`) | La página. Las rutas internas (`/mensajes`, `/vender`…) caen en `index.html`. |
+| `server` | `server/` (Express, `app.js`) | `/api/*` y `/articulo/*` | La API y las vistas previas para WhatsApp. |
+
+`server` tiene un binding a `client` (`CLIENT_URL`, lo inyecta Vercel): lo usa solo para leer `index.html` y agregarle las etiquetas de vista previa en `/articulo/:id`. La base va en **Turso** y las fotos en **Cloudinary** (ver pasos 1 y 2 más abajo para crear esas dos cuentas).
 
 1. Entrá a <https://vercel.com/signup>, elegí **Hobby** y **Continue with GitHub**.
 2. **Add New → Project** → **Import** el repositorio `JESSICA-RIQUELME`.
@@ -21,6 +28,7 @@ Vercel corre la página y la API (`vercel.json` + `api/index.js`); la base va en
 
 Notas:
 - Las funciones corren en São Paulo (`gru1`), al lado de la base de Turso.
+- Para probar los dos servicios juntos en local: `npx vercel dev -L`.
 - Cada envío a Vercel puede pesar hasta 4,5 MB; por eso la app achica las fotos en el celular antes de subirlas (`client/src/images.js`).
 - El plan Hobby de Vercel es para uso personal o no comercial. Para empezar y probar está bien; si PasalO crece como negocio, conviene pasar al plan Pro o a otro hosting (el mismo código corre en Render, Railway o un VPS con el `Dockerfile`).
 

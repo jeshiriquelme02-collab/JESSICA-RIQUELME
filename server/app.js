@@ -626,18 +626,38 @@ app.post('/api/conversations/:id/messages', auth(true), async (req, res) => {
 app.use('/api', (req, res) => res.status(404).json({ error: 'Ruta no encontrada' }));
 
 // --- frontend compilado (modo producción: npm run build && npm start)
+//
+// La página base (index.html) sale del build local, o en Vercel Services del servicio
+// "client", cuya dirección interna Vercel inyecta en CLIENT_URL (binding en vercel.json).
 
-if (fs.existsSync(CLIENT_DIST)) {
-  const indexHtml = fs.readFileSync(path.join(CLIENT_DIST, 'index.html'), 'utf8');
+const HAS_DIST = fs.existsSync(CLIENT_DIST);
+const CLIENT_URL = process.env.CLIENT_URL;
+let indexHtmlCache = null;
+
+async function indexHtml() {
+  if (indexHtmlCache) return indexHtmlCache;
+  if (HAS_DIST) {
+    indexHtmlCache = fs.readFileSync(path.join(CLIENT_DIST, 'index.html'), 'utf8');
+  } else {
+    const base = CLIENT_URL.endsWith('/') ? CLIENT_URL : `${CLIENT_URL}/`;
+    const r = await fetch(new URL('index.html', base));
+    if (!r.ok) throw new Error(`No se pudo leer index.html del servicio client (HTTP ${r.status})`);
+    indexHtmlCache = await r.text();
+  }
+  return indexHtmlCache;
+}
+
+if (HAS_DIST) app.use(express.static(CLIENT_DIST, { index: false }));
+
+if (HAS_DIST || CLIENT_URL) {
   const escapeHtml = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 
-  app.use(express.static(CLIENT_DIST, { index: false }));
-
   // Vista previa (Open Graph) cuando se comparte un artículo en WhatsApp, Facebook, etc.
-  app.get('/articulo/:id', async (req, res, next) => {
+  app.get('/articulo/:id', async (req, res) => {
     const id = parseInt(req.params.id, 10);
     const item = id > 0 ? await get('SELECT id, title, price, description FROM items WHERE id = ?', [id]) : null;
-    if (!item) return next();
+    const html = await indexHtml();
+    if (!item) return res.type('html').send(html);
     const cover = await get('SELECT filename FROM item_photos WHERE item_id = ? ORDER BY position LIMIT 1', [id]);
     const base = `${req.protocol}://${req.get('host')}`;
     const image = cover ? photoUrl(cover.filename) : null;
@@ -653,9 +673,11 @@ if (fs.existsSync(CLIENT_DIST)) {
     ]
       .filter(Boolean)
       .join('\n    ');
-    res.type('html').send(indexHtml.replace('</head>', `    ${tags}\n  </head>`));
+    res.type('html').send(html.replace('</head>', `    ${tags}\n  </head>`));
   });
+}
 
+if (HAS_DIST) {
   app.use((req, res, next) => {
     if (req.method !== 'GET' || req.path.startsWith('/uploads')) return next();
     res.sendFile(path.join(CLIENT_DIST, 'index.html'));
