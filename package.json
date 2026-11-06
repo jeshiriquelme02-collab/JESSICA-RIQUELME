@@ -1,6 +1,7 @@
 {
   "name": "pasalo",
   "private": true,
+  "type": "module",
   "description": "Marketplace de segunda mano para Paraguay (estilo Vinted)",
   "scripts": {
     "install:all": "npm install && npm install --prefix server && npm install --prefix client",

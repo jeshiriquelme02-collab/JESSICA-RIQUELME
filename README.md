@@ -86,7 +86,7 @@ La misma web se empaqueta con Capacitor. Los proyectos nativos están en `client
 
 ## Publicarlo en internet
 
-Todos los pasos (Render + Turso + Cloudinary, gratis) están en [DEPLOY.md](DEPLOY.md).
+Todos los pasos (Vercel + Turso + Cloudinary, gratis y sin tarjeta) están en [DEPLOY.md](DEPLOY.md).
 
 Ya incluido: límites anti-abuso, botón de denunciar, borrado de cuenta, términos y privacidad, vistas previas al compartir. Pendiente para más adelante:
 

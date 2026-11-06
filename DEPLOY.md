@@ -1,5 +1,33 @@
 # 🚀 Publicar PasalO en internet (gratis)
 
+## Opción recomendada: Vercel (gratis, sin tarjeta)
+
+Vercel corre la página y la API (`vercel.json` + `api/index.js`); la base va en **Turso** y las fotos en **Cloudinary** (ver pasos 1 y 2 más abajo para crear esas dos cuentas).
+
+1. Entrá a <https://vercel.com/signup>, elegí **Hobby** y **Continue with GitHub**.
+2. **Add New → Project** → **Import** el repositorio `JESSICA-RIQUELME`.
+3. **Project Name**: `pasalo`. No cambies nada de Build Settings: los toma de `vercel.json`.
+4. En **Environment Variables**, pegá en el primer casillero las tres líneas juntas (Vercel las separa solo):
+
+   ```
+   DB_URL=libsql://...
+   DB_AUTH_TOKEN=eyJ...
+   CLOUDINARY_URL=cloudinary://...
+   ```
+
+5. **Deploy**. En 2 o 3 minutos queda en `https://pasalo.vercel.app` (o el nombre que asigne Vercel).
+
+`PUBLIC_URL` no hace falta en Vercel: las fotos de Cloudinary ya tienen dirección completa y las vistas previas usan el dominio de la visita.
+
+Notas:
+- Las funciones corren en São Paulo (`gru1`), al lado de la base de Turso.
+- Cada envío a Vercel puede pesar hasta 4,5 MB; por eso la app achica las fotos en el celular antes de subirlas (`client/src/images.js`).
+- El plan Hobby de Vercel es para uso personal o no comercial. Para empezar y probar está bien; si PasalO crece como negocio, conviene pasar al plan Pro o a otro hosting (el mismo código corre en Render, Railway o un VPS con el `Dockerfile`).
+
+---
+
+## Otras opciones
+
 Tres servicios gratuitos, cada uno hace una cosa:
 
 | Servicio | Para qué | Plan gratis |

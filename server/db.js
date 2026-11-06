@@ -1,6 +1,5 @@
 // Base de datos SQLite vía libsql: un archivo local en desarrollo, o Turso en la nube
 // (gratis) cuando están definidas DB_URL y DB_AUTH_TOKEN.
-import { createClient } from '@libsql/client';
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -9,6 +8,10 @@ const DB_FILE = process.env.DB_FILE || path.join(DATA_DIR, 'cheropero.db');
 const REMOTE = Boolean(process.env.DB_URL);
 
 if (!REMOTE) fs.mkdirSync(path.dirname(DB_FILE), { recursive: true });
+
+// Contra Turso alcanza el cliente "web" (HTTP, sin módulos nativos), ideal para Vercel.
+// Para el archivo local hace falta el cliente completo.
+const { createClient } = REMOTE ? await import('@libsql/client/web') : await import('@libsql/client');
 
 export const db = createClient(
   REMOTE

@@ -41,6 +41,7 @@ export async function api(path, { method = 'GET', body, form } = {}) {
     throw new Error('No se pudo conectar con el servidor');
   }
   const data = res.status === 204 ? null : await res.json().catch(() => null);
+  if (res.status === 413) throw new Error('Las fotos pesan demasiado. Probá con menos fotos o más chicas.');
   if (!res.ok) {
     const err = new Error(data?.error || 'Ocurrió un error, intentá de nuevo');
     err.status = res.status;
