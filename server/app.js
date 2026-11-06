@@ -3,7 +3,7 @@ import multer from 'multer';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { all, get, ready, run, transaction } from './db.js';
+import { all, get, ready, REMOTE, run, transaction } from './db.js';
 import { removePhotos, storePhotos, UPLOAD_DIR, USE_CLOUDINARY } from './photos.js';
 import { CATEGORIES, CITIES, CONDITIONS, STATUSES } from './constants.js';
 
@@ -19,7 +19,8 @@ const STATUS_IDS = new Set(STATUSES.map((s) => s.id));
 const CITY_SET = new Set(CITIES);
 const IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
 
-await ready;
+// En Vercel no hay disco: sin estas claves no se puede guardar nada
+const MISSING_CONFIG = process.env.VERCEL ? ['DB_URL', 'DB_AUTH_TOKEN', 'CLOUDINARY_URL'].filter((k) => !process.env[k]) : [];
 
 // ---------------------------------------------------------------- utilidades
 
@@ -234,7 +235,35 @@ const registerLimit = rateLimit({ max: 5, windowMs: 60 * MIN, message: 'Demasiad
 const publishLimit = rateLimit({ max: 30, windowMs: 60 * MIN, message: 'Publicaste muchas cosas seguidas. Esperá un rato.' });
 const reportLimit = rateLimit({ max: 10, windowMs: 60 * MIN, message: 'Demasiadas denuncias seguidas.' });
 
-app.get('/api/health', (req, res) => res.json({ ok: true }));
+// Estado del servidor. Con ?db=1 también prueba la conexión a la base (sirve para diagnosticar).
+app.get('/api/health', async (req, res) => {
+  const status = { ok: MISSING_CONFIG.length === 0, db: REMOTE ? 'turso' : 'archivo local', photos: USE_CLOUDINARY ? 'cloudinary' : 'disco' };
+  if (MISSING_CONFIG.length) status.missing = MISSING_CONFIG;
+  if (req.query.db) {
+    try {
+      await ready();
+      status.dbReady = true;
+    } catch (err) {
+      status.ok = false;
+      status.dbError = String(err.message || err).slice(0, 200);
+    }
+  }
+  res.status(status.ok ? 200 : 503).json(status);
+});
+
+// Antes de cualquier otro pedido: configuración completa y tablas creadas
+app.use(async (req, res, next) => {
+  if (MISSING_CONFIG.length) {
+    return res.status(503).json({ error: `Falta configurar en Vercel: ${MISSING_CONFIG.join(', ')}` });
+  }
+  try {
+    await ready();
+  } catch (err) {
+    console.error('No se pudo preparar la base de datos:', err);
+    return res.status(503).json({ error: 'No se pudo conectar con la base de datos. Probá de nuevo en un rato.' });
+  }
+  next();
+});
 
 // CORS: la app de celular (Capacitor) llama a la API desde su propio origen
 const APP_ORIGINS = new Set(['capacitor://localhost', 'http://localhost', 'https://localhost', PUBLIC_URL].filter(Boolean));

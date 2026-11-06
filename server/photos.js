@@ -5,7 +5,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { v2 as cloudinary } from 'cloudinary';
 
-export const UPLOAD_DIR = process.env.UPLOAD_DIR || path.join(import.meta.dirname, 'uploads');
+// En Vercel solo se puede escribir en /tmp (y se borra): allá siempre hay que usar Cloudinary
+export const UPLOAD_DIR = process.env.UPLOAD_DIR || (process.env.VERCEL ? '/tmp/uploads' : path.join(import.meta.dirname, 'uploads'));
 export const USE_CLOUDINARY = Boolean(process.env.CLOUDINARY_URL);
 
 const EXT = { 'image/jpeg': '.jpg', 'image/png': '.png', 'image/webp': '.webp', 'image/svg+xml': '.svg' };

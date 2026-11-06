@@ -3,33 +3,44 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-const DATA_DIR = path.join(import.meta.dirname, 'data');
+// En Vercel solo se puede escribir en /tmp
+const DATA_DIR = process.env.VERCEL ? '/tmp' : path.join(import.meta.dirname, 'data');
 const DB_FILE = process.env.DB_FILE || path.join(DATA_DIR, 'cheropero.db');
-const REMOTE = Boolean(process.env.DB_URL);
+export const REMOTE = Boolean(process.env.DB_URL);
 
-if (!REMOTE) fs.mkdirSync(path.dirname(DB_FILE), { recursive: true });
+// El cliente se crea la primera vez que se usa (sin await al importar el módulo), así
+// un problema de conexión devuelve un error claro en vez de tirar abajo el servidor.
+let clientPromise = null;
+export function getDb() {
+  clientPromise ??= (async () => {
+    // Contra Turso alcanza el cliente "web" (HTTP, sin módulos nativos), ideal para Vercel.
+    // Para el archivo local hace falta el cliente completo.
+    if (REMOTE) {
+      const { createClient } = await import('@libsql/client/web');
+      return createClient({ url: process.env.DB_URL, authToken: process.env.DB_AUTH_TOKEN });
+    }
+    fs.mkdirSync(path.dirname(DB_FILE), { recursive: true });
+    const { createClient } = await import('@libsql/client');
+    return createClient({ url: `file:${DB_FILE.replace(/\\/g, '/')}` });
+  })().catch((err) => {
+    clientPromise = null;
+    throw err;
+  });
+  return clientPromise;
+}
 
-// Contra Turso alcanza el cliente "web" (HTTP, sin módulos nativos), ideal para Vercel.
-// Para el archivo local hace falta el cliente completo.
-const { createClient } = REMOTE ? await import('@libsql/client/web') : await import('@libsql/client');
-
-export const db = createClient(
-  REMOTE
-    ? { url: process.env.DB_URL, authToken: process.env.DB_AUTH_TOKEN }
-    : { url: `file:${DB_FILE.replace(/\\/g, '/')}` }
-);
-
-// Atajos: get (una fila), all (varias), run (escritura). `conn` puede ser db o una transacción.
-export const get = async (sql, args = [], conn = db) => (await conn.execute({ sql, args })).rows[0];
-export const all = async (sql, args = [], conn = db) => (await conn.execute({ sql, args })).rows;
-export const run = async (sql, args = [], conn = db) => {
-  const r = await conn.execute({ sql, args });
+// Atajos: get (una fila), all (varias), run (escritura). `conn` es una transacción, o la base si se omite.
+const exec = async (sql, args, conn) => (conn ?? (await getDb())).execute({ sql, args });
+export const get = async (sql, args = [], conn) => (await exec(sql, args, conn)).rows[0];
+export const all = async (sql, args = [], conn) => (await exec(sql, args, conn)).rows;
+export const run = async (sql, args = [], conn) => {
+  const r = await exec(sql, args, conn);
   return { lastInsertRowid: Number(r.lastInsertRowid), changes: r.rowsAffected };
 };
 
 // Ejecuta fn(tx) dentro de una transacción; tx tiene get/all/run propios.
 export async function transaction(fn) {
-  const t = await db.transaction('write');
+  const t = await (await getDb()).transaction('write');
   try {
     const tx = {
       get: (sql, args) => get(sql, args, t),
@@ -128,6 +139,7 @@ const SCHEMA = `
 `;
 
 async function init() {
+  const db = await getDb();
   if (!REMOTE) await db.execute('PRAGMA journal_mode = WAL');
   await db.executeMultiple(SCHEMA);
 
@@ -139,5 +151,12 @@ async function init() {
   }
 }
 
-// Esperar `ready` antes de atender peticiones
-export const ready = init();
+// Crea las tablas una sola vez; si falla, el próximo pedido vuelve a intentar.
+let readyPromise = null;
+export function ready() {
+  readyPromise ??= init().catch((err) => {
+    readyPromise = null;
+    throw err;
+  });
+  return readyPromise;
+}

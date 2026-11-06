@@ -4,7 +4,7 @@ import crypto from 'node:crypto';
 import { get, ready, run, transaction } from './db.js';
 import { storePhotos } from './photos.js';
 
-await ready;
+await ready();
 
 if (await get("SELECT 1 FROM users WHERE email LIKE '%@demo.test'")) {
   console.log('Los datos demo ya están cargados.');
