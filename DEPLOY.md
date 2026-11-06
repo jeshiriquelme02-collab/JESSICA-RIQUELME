@@ -24,7 +24,8 @@ El servidor lee estas variables de entorno:
 ## Paso a paso en Railway
 
 ### 1. Subir el código a GitHub
-Railway despliega desde un repositorio. Si todavía no tenés uno:
+Railway despliega desde un repositorio. El de PasalO ya está en
+<https://github.com/jeshiriquelme02-collab/JESSICA-RIQUELME>. Si algún día lo armás de cero:
 
 1. Instalá Git si no lo tenés: <https://git-scm.com/download/win> (o `winget install Git.Git`).
 2. Creá una cuenta en <https://github.com> y un repositorio nuevo, privado, llamado `pasalo`.
@@ -52,7 +53,7 @@ git push -u origin main
 
 ### 2. Crear el proyecto
 1. Entrá en <https://railway.app> e iniciá sesión con GitHub.
-2. **New Project → Deploy from GitHub repo → `pasalo`**. Railway detecta el `Dockerfile` y empieza a construir (tarda 3 a 5 minutos la primera vez).
+2. **New Project → Deploy from GitHub repo → `JESSICA-RIQUELME`**. Railway detecta el `Dockerfile` y empieza a construir (tarda 3 a 5 minutos la primera vez).
 
 ### 3. Agregar el disco persistente (importante)
 Sin esto, **cada vez que se reinicie el servidor se pierden la base de datos y las fotos.**
