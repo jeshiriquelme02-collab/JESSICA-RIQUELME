@@ -1,0 +1,17 @@
+# Blueprint de Render: New → Blueprint → elegir el repositorio y listo.
+services:
+  - type: web
+    name: pasalo
+    runtime: docker
+    plan: free
+    region: ohio
+    healthCheckPath: /api/health
+    envVars:
+      - key: PUBLIC_URL
+        sync: false
+      - key: DB_URL
+        sync: false
+      - key: DB_AUTH_TOKEN
+        sync: false
+      - key: CLOUDINARY_URL
+        sync: false

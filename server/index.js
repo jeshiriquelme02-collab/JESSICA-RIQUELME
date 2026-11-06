@@ -3,24 +3,23 @@ import multer from 'multer';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { db, transaction } from './db.js';
+import { all, get, ready, run, transaction } from './db.js';
+import { removePhotos, storePhotos, UPLOAD_DIR, USE_CLOUDINARY } from './photos.js';
 import { CATEGORIES, CITIES, CONDITIONS, STATUSES } from './constants.js';
 
 const PORT = Number(process.env.PORT) || 3001;
-// En producción conviene apuntar UPLOAD_DIR (y DB_FILE, ver db.js) a un disco persistente
-const UPLOAD_DIR = process.env.UPLOAD_DIR || path.join(import.meta.dirname, 'uploads');
 const CLIENT_DIST = path.join(import.meta.dirname, '..', 'client', 'dist');
 const PAGE_SIZE = 24;
 const MAX_PHOTOS = 5;
 const MAX_PHOTO_MB = 8;
 
-fs.mkdirSync(UPLOAD_DIR, { recursive: true });
-
 const CATEGORY_IDS = new Set(CATEGORIES.map((c) => c.id));
 const CONDITION_IDS = new Set(CONDITIONS.map((c) => c.id));
 const STATUS_IDS = new Set(STATUSES.map((s) => s.id));
 const CITY_SET = new Set(CITIES);
-const IMAGE_TYPES = { 'image/jpeg': '.jpg', 'image/png': '.png', 'image/webp': '.webp' };
+const IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
+
+await ready;
 
 // ---------------------------------------------------------------- utilidades
 
@@ -36,10 +35,13 @@ const fail = (status, message) => {
 const now = () => new Date().toISOString();
 const sha256 = (s) => crypto.createHash('sha256').update(s).digest('hex');
 
-// Dirección pública del sitio (ej. https://pasalo.com.py). Con ella las fotos se
+// Dirección pública del sitio (ej. https://pasalo.com.py). Con ella las fotos locales se
 // devuelven con URL absoluta, necesario para la app de celular.
 const PUBLIC_URL = (process.env.PUBLIC_URL || '').replace(/\/$/, '');
-const photoUrl = (filename) => (filename ? `${PUBLIC_URL}/uploads/${filename}` : null);
+const photoUrl = (filename) => {
+  if (!filename) return null;
+  return /^https?:/.test(filename) ? filename : `${PUBLIC_URL}/uploads/${filename}`;
+};
 
 function idParam(value) {
   const id = Number(value);
@@ -78,6 +80,9 @@ function normalizePhone(value) {
   return n;
 }
 
+// Acepta true/false, 1/0 y los strings que manda un formulario
+const parseBool = (v) => (v === true || v === 1 || v === '1' || v === 'true' || v === 'on' ? 1 : 0);
+
 function hashPassword(password, salt = crypto.randomBytes(16).toString('hex')) {
   return { hash: crypto.scryptSync(password, salt, 64).toString('hex'), salt };
 }
@@ -88,29 +93,28 @@ function verifyPassword(password, salt, hash) {
   return stored.length === candidate.length && crypto.timingSafeEqual(candidate, stored);
 }
 
-function createSession(userId) {
+async function createSession(userId) {
   const token = crypto.randomBytes(32).toString('base64url');
-  db.prepare('INSERT INTO sessions (token_hash, user_id, created_at) VALUES (?, ?, ?)').run(sha256(token), userId, now());
+  await run('INSERT INTO sessions (token_hash, user_id, created_at) VALUES (?, ?, ?)', [sha256(token), userId, now()]);
   return token;
 }
 
 // Las primeras cuentas reciben la insignia de Fundador/a para siempre
 const FOUNDERS = 100;
-const foundersLeft = () => Math.max(0, FOUNDERS - db.prepare('SELECT COUNT(*) AS n FROM users').get().n);
+const foundersLeft = async () => Math.max(0, FOUNDERS - (await get('SELECT COUNT(*) AS n FROM users')).n);
 
 const publicUser = (u) => ({ id: u.id, name: u.name, city: u.city, createdAt: u.created_at, founder: u.id <= FOUNDERS });
 const selfUser = (u) => ({ ...publicUser(u), email: u.email, phone: u.phone });
 
 function auth(required) {
-  return (req, res, next) => {
+  return async (req, res, next) => {
     const header = req.get('authorization') || '';
     if (header.startsWith('Bearer ')) {
-      const user = db
-        .prepare('SELECT u.* FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token_hash = ?')
-        .get(sha256(header.slice(7)));
+      const tokenHash = sha256(header.slice(7));
+      const user = await get('SELECT u.* FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token_hash = ?', [tokenHash]);
       if (user) {
         req.user = user;
-        req.tokenHash = sha256(header.slice(7));
+        req.tokenHash = tokenHash;
       }
     }
     if (required && !req.user) return res.status(401).json({ error: 'Tenés que iniciar sesión' });
@@ -120,21 +124,17 @@ function auth(required) {
 
 // ---------------------------------------------------------------- fotos
 
+// Las fotos llegan a memoria y después van a Cloudinary o al disco (ver photos.js)
 const upload = multer({
-  storage: multer.diskStorage({
-    destination: UPLOAD_DIR,
-    filename: (req, file, cb) => cb(null, crypto.randomUUID() + IMAGE_TYPES[file.mimetype]),
-  }),
+  storage: multer.memoryStorage(),
   limits: { fileSize: MAX_PHOTO_MB * 1024 * 1024, files: MAX_PHOTOS, fields: 20 },
   fileFilter: (req, file, cb) => {
-    if (IMAGE_TYPES[file.mimetype]) cb(null, true);
+    if (IMAGE_TYPES.has(file.mimetype)) cb(null, true);
     else cb(new HttpError(400, 'Solo se aceptan fotos JPG, PNG o WEBP'));
   },
 });
 
-function removeFiles(filenames) {
-  for (const f of filenames) fs.rm(path.join(UPLOAD_DIR, path.basename(f)), { force: true }, () => {});
-}
+const itemPhotos = (itemId, conn) => all('SELECT filename, public_id FROM item_photos WHERE item_id = ? ORDER BY position', [itemId], conn);
 
 // ---------------------------------------------------------------- artículos
 
@@ -144,16 +144,14 @@ const LIST_SELECT = `
     (SELECT COUNT(*) FROM favorites f WHERE f.item_id = i.id) AS fav_count
   FROM items i JOIN users u ON u.id = i.user_id`;
 
-function favoriteSet(user, ids) {
+async function favoriteSet(user, ids) {
   if (!user || ids.length === 0) return new Set();
-  const rows = db
-    .prepare(`SELECT item_id FROM favorites WHERE user_id = ? AND item_id IN (${ids.map(() => '?').join(',')})`)
-    .all(user.id, ...ids);
+  const rows = await all(`SELECT item_id FROM favorites WHERE user_id = ? AND item_id IN (${ids.map(() => '?').join(',')})`, [user.id, ...ids]);
   return new Set(rows.map((r) => r.item_id));
 }
 
-function toListItems(rows, user) {
-  const favs = favoriteSet(user, rows.map((r) => r.id));
+async function toListItems(rows, user) {
+  const favs = await favoriteSet(user, rows.map((r) => r.id));
   return rows.map((r) => ({
     id: r.id,
     title: r.title,
@@ -187,21 +185,28 @@ function validateItem(body) {
   };
 }
 
-// Acepta true/false, 1/0 y los strings que manda un formulario
-const parseBool = (v) => (v === true || v === 1 || v === '1' || v === 'true' || v === 'on' ? 1 : 0);
-
-function getOwnedItem(id, user) {
-  const item = db.prepare('SELECT * FROM items WHERE id = ?').get(id);
+async function getOwnedItem(id, user) {
+  const item = await get('SELECT * FROM items WHERE id = ?', [id]);
   if (!item) fail(404, 'Esta publicación no existe');
   if (item.user_id !== user.id) fail(403, 'Solo el vendedor puede modificar esta publicación');
   return item;
+}
+
+// Borra un artículo y todo lo que cuelga de él (sin depender de ON DELETE CASCADE)
+async function deleteItemRows(tx, itemId) {
+  await tx.run('DELETE FROM messages WHERE conversation_id IN (SELECT id FROM conversations WHERE item_id = ?)', [itemId]);
+  await tx.run('DELETE FROM conversations WHERE item_id = ?', [itemId]);
+  await tx.run('DELETE FROM favorites WHERE item_id = ?', [itemId]);
+  await tx.run('DELETE FROM reports WHERE item_id = ?', [itemId]);
+  await tx.run('DELETE FROM item_photos WHERE item_id = ?', [itemId]);
+  await tx.run('DELETE FROM items WHERE id = ?', [itemId]);
 }
 
 // ---------------------------------------------------------------- app
 
 const app = express();
 app.disable('x-powered-by');
-// Detrás del proxy del hosting (Railway, Render, Nginx) para que req.protocol sea https
+// Detrás del proxy del hosting (Render, Railway, Nginx) para que req.protocol sea https
 app.set('trust proxy', 1);
 
 // Límite de intentos por IP, en memoria. Frena fuerza bruta y spam sin dependencias.
@@ -247,9 +252,9 @@ app.use((req, res, next) => {
 });
 
 app.use(express.json({ limit: '100kb' }));
-app.use('/uploads', express.static(UPLOAD_DIR, { maxAge: '7d', index: false }));
+if (!USE_CLOUDINARY) app.use('/uploads', express.static(UPLOAD_DIR, { maxAge: '7d', index: false }));
 
-app.get('/api/meta', (req, res) => {
+app.get('/api/meta', async (req, res) => {
   res.json({
     categories: CATEGORIES,
     conditions: CONDITIONS,
@@ -258,13 +263,13 @@ app.get('/api/meta', (req, res) => {
     maxPhotos: MAX_PHOTOS,
     maxPhotoMb: MAX_PHOTO_MB,
     founders: FOUNDERS,
-    foundersLeft: foundersLeft(),
+    foundersLeft: await foundersLeft(),
   });
 });
 
 // --- autenticación
 
-app.post('/api/auth/register', registerLimit, (req, res) => {
+app.post('/api/auth/register', registerLimit, async (req, res) => {
   const body = req.body ?? {};
   const name = text(body.name, { field: 'Nombre', min: 2, max: 60, required: true });
   const email = text(body.email, { field: 'Email', max: 120, required: true }).toLowerCase();
@@ -275,28 +280,29 @@ app.post('/api/auth/register', registerLimit, (req, res) => {
   const city = oneOf(body.city, CITY_SET, 'Ciudad');
   const phone = normalizePhone(body.phone);
 
-  if (db.prepare('SELECT 1 FROM users WHERE email = ?').get(email)) fail(409, 'Ya existe una cuenta con ese email');
+  if (await get('SELECT 1 FROM users WHERE email = ?', [email])) fail(409, 'Ya existe una cuenta con ese email');
 
   const { hash, salt } = hashPassword(password);
-  const result = db
-    .prepare('INSERT INTO users (name, email, password_hash, password_salt, city, phone, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
-    .run(name, email, hash, salt, city, phone, now());
-  const user = db.prepare('SELECT * FROM users WHERE id = ?').get(Number(result.lastInsertRowid));
-  res.status(201).json({ token: createSession(user.id), user: selfUser(user) });
+  const result = await run(
+    'INSERT INTO users (name, email, password_hash, password_salt, city, phone, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+    [name, email, hash, salt, city, phone, now()]
+  );
+  const user = await get('SELECT * FROM users WHERE id = ?', [result.lastInsertRowid]);
+  res.status(201).json({ token: await createSession(user.id), user: selfUser(user) });
 });
 
-app.post('/api/auth/login', loginLimit, (req, res) => {
+app.post('/api/auth/login', loginLimit, async (req, res) => {
   const email = String(req.body?.email ?? '').trim().toLowerCase();
   const password = String(req.body?.password ?? '');
-  const user = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
+  const user = await get('SELECT * FROM users WHERE email = ?', [email]);
   if (!user || !verifyPassword(password, user.password_salt, user.password_hash)) {
     fail(401, 'Email o contraseña incorrectos');
   }
-  res.json({ token: createSession(user.id), user: selfUser(user) });
+  res.json({ token: await createSession(user.id), user: selfUser(user) });
 });
 
-app.post('/api/auth/logout', auth(true), (req, res) => {
-  db.prepare('DELETE FROM sessions WHERE token_hash = ?').run(req.tokenHash);
+app.post('/api/auth/logout', auth(true), async (req, res) => {
+  await run('DELETE FROM sessions WHERE token_hash = ?', [req.tokenHash]);
   res.status(204).end();
 });
 
@@ -305,48 +311,44 @@ app.get('/api/auth/me', auth(true), (req, res) => {
 });
 
 // Borrar la cuenta y todo lo asociado (lo exigen Google Play y App Store)
-app.delete('/api/me', auth(true), (req, res) => {
+app.delete('/api/me', auth(true), async (req, res) => {
   const uid = req.user.id;
-  const photos = db
-    .prepare('SELECT p.filename FROM item_photos p JOIN items i ON i.id = p.item_id WHERE i.user_id = ?')
-    .all(uid)
-    .map((p) => p.filename);
-  transaction(() => {
-    db.prepare('DELETE FROM messages WHERE conversation_id IN (SELECT id FROM conversations WHERE buyer_id = ? OR seller_id = ?)').run(uid, uid);
-    db.prepare('DELETE FROM conversations WHERE buyer_id = ? OR seller_id = ?').run(uid, uid);
-    db.prepare('DELETE FROM favorites WHERE user_id = ?').run(uid);
-    db.prepare('DELETE FROM reports WHERE user_id = ?').run(uid);
-    db.prepare('DELETE FROM item_photos WHERE item_id IN (SELECT id FROM items WHERE user_id = ?)').run(uid);
-    db.prepare('DELETE FROM items WHERE user_id = ?').run(uid);
-    db.prepare('DELETE FROM sessions WHERE user_id = ?').run(uid);
-    db.prepare('DELETE FROM users WHERE id = ?').run(uid);
+  const photos = await all('SELECT p.filename, p.public_id FROM item_photos p JOIN items i ON i.id = p.item_id WHERE i.user_id = ?', [uid]);
+  await transaction(async (tx) => {
+    const items = await tx.all('SELECT id FROM items WHERE user_id = ?', [uid]);
+    for (const it of items) await deleteItemRows(tx, it.id);
+    await tx.run('DELETE FROM messages WHERE conversation_id IN (SELECT id FROM conversations WHERE buyer_id = ? OR seller_id = ?)', [uid, uid]);
+    await tx.run('DELETE FROM conversations WHERE buyer_id = ? OR seller_id = ?', [uid, uid]);
+    await tx.run('DELETE FROM favorites WHERE user_id = ?', [uid]);
+    await tx.run('DELETE FROM reports WHERE user_id = ?', [uid]);
+    await tx.run('DELETE FROM sessions WHERE user_id = ?', [uid]);
+    await tx.run('DELETE FROM users WHERE id = ?', [uid]);
   });
-  removeFiles(photos);
+  await removePhotos(photos);
   res.status(204).end();
 });
 
-app.patch('/api/me', auth(true), (req, res) => {
+app.patch('/api/me', auth(true), async (req, res) => {
   const body = req.body ?? {};
   const name = text(body.name, { field: 'Nombre', min: 2, max: 60, required: true });
   const city = oneOf(body.city, CITY_SET, 'Ciudad');
   const phone = normalizePhone(body.phone);
-  db.prepare('UPDATE users SET name = ?, city = ?, phone = ? WHERE id = ?').run(name, city, phone, req.user.id);
-  res.json({ user: selfUser(db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id)) });
+  await run('UPDATE users SET name = ?, city = ?, phone = ? WHERE id = ?', [name, city, phone, req.user.id]);
+  res.json({ user: selfUser(await get('SELECT * FROM users WHERE id = ?', [req.user.id])) });
 });
 
-app.get('/api/me/unread', auth(true), (req, res) => {
-  const { n } = db
-    .prepare(
-      `SELECT COUNT(*) AS n FROM messages m JOIN conversations c ON c.id = m.conversation_id
-       WHERE (c.buyer_id = ? OR c.seller_id = ?) AND m.sender_id <> ? AND m.read_at IS NULL`
-    )
-    .get(req.user.id, req.user.id, req.user.id);
+app.get('/api/me/unread', auth(true), async (req, res) => {
+  const { n } = await get(
+    `SELECT COUNT(*) AS n FROM messages m JOIN conversations c ON c.id = m.conversation_id
+     WHERE (c.buyer_id = ? OR c.seller_id = ?) AND m.sender_id <> ? AND m.read_at IS NULL`,
+    [req.user.id, req.user.id, req.user.id]
+  );
   res.json({ count: n });
 });
 
 // --- artículos
 
-app.get('/api/items', auth(false), (req, res) => {
+app.get('/api/items', auth(false), async (req, res) => {
   const q = String(req.query.q ?? '').trim().slice(0, 80);
   const { category = '', city = '', sort = 'recent' } = req.query;
   const page = Math.max(1, parseInt(req.query.page, 10) || 1);
@@ -394,22 +396,20 @@ app.get('/api/items', auth(false), (req, res) => {
     }[sort] ?? 'i.created_at DESC';
   const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
 
-  const { n: total } = db.prepare(`SELECT COUNT(*) AS n FROM items i ${whereSql}`).get(...params);
-  const rows = db
-    .prepare(`${LIST_SELECT} ${whereSql} ORDER BY ${order}, i.id DESC LIMIT ? OFFSET ?`)
-    .all(...params, PAGE_SIZE, (page - 1) * PAGE_SIZE);
+  const { n: total } = await get(`SELECT COUNT(*) AS n FROM items i ${whereSql}`, params);
+  const rows = await all(`${LIST_SELECT} ${whereSql} ORDER BY ${order}, i.id DESC LIMIT ? OFFSET ?`, [...params, PAGE_SIZE, (page - 1) * PAGE_SIZE]);
 
-  res.json({ items: toListItems(rows, req.user), total, page, hasMore: page * PAGE_SIZE < total });
+  res.json({ items: await toListItems(rows, req.user), total, page, hasMore: page * PAGE_SIZE < total });
 });
 
-app.get('/api/items/:id', auth(false), (req, res) => {
+app.get('/api/items/:id', auth(false), async (req, res) => {
   const id = idParam(req.params.id);
-  const item = db.prepare('SELECT * FROM items WHERE id = ?').get(id);
+  const item = await get('SELECT * FROM items WHERE id = ?', [id]);
   if (!item) fail(404, 'Esta publicación no existe');
-  const seller = db.prepare('SELECT * FROM users WHERE id = ?').get(item.user_id);
-  const photos = db.prepare('SELECT filename FROM item_photos WHERE item_id = ? ORDER BY position').all(id);
-  const { n: favorites } = db.prepare('SELECT COUNT(*) AS n FROM favorites WHERE item_id = ?').get(id);
-  const { n: sellerItems } = db.prepare('SELECT COUNT(*) AS n FROM items WHERE user_id = ?').get(seller.id);
+  const seller = await get('SELECT * FROM users WHERE id = ?', [item.user_id]);
+  const photos = await itemPhotos(id);
+  const { n: favorites } = await get('SELECT COUNT(*) AS n FROM favorites WHERE item_id = ?', [id]);
+  const { n: sellerItems } = await get('SELECT COUNT(*) AS n FROM items WHERE user_id = ?', [seller.id]);
 
   res.json({
     id: item.id,
@@ -426,39 +426,40 @@ app.get('/api/items/:id', auth(false), (req, res) => {
     createdAt: item.created_at,
     photos: photos.map((p) => photoUrl(p.filename)),
     favorites,
-    isFavorite: favoriteSet(req.user, [id]).has(id),
+    isFavorite: (await favoriteSet(req.user, [id])).has(id),
     isOwner: req.user?.id === item.user_id,
     seller: { ...publicUser(seller), phone: seller.phone, itemCount: sellerItems },
   });
 });
 
-app.post('/api/items', auth(true), publishLimit, upload.array('photos', MAX_PHOTOS), (req, res) => {
+app.post('/api/items', auth(true), publishLimit, upload.array('photos', MAX_PHOTOS), async (req, res) => {
   const files = req.files ?? [];
+  if (files.length === 0) fail(400, 'Subí al menos una foto');
+  const data = validateItem(req.body ?? {});
+  const stored = await storePhotos(files);
   try {
-    if (files.length === 0) fail(400, 'Subí al menos una foto');
-    const data = validateItem(req.body ?? {});
-    const id = transaction(() => {
-      const result = db
-        .prepare(
-          `INSERT INTO items (user_id, title, description, price, category, condition, size, brand, city, swap, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-        )
-        .run(req.user.id, data.title, data.description, data.price, data.category, data.condition, data.size, data.brand, data.city, data.swap, now());
-      const itemId = Number(result.lastInsertRowid);
-      const insertPhoto = db.prepare('INSERT INTO item_photos (item_id, filename, position) VALUES (?, ?, ?)');
-      files.forEach((f, i) => insertPhoto.run(itemId, f.filename, i));
+    const id = await transaction(async (tx) => {
+      const result = await tx.run(
+        `INSERT INTO items (user_id, title, description, price, category, condition, size, brand, city, swap, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [req.user.id, data.title, data.description, data.price, data.category, data.condition, data.size, data.brand, data.city, data.swap, now()]
+      );
+      const itemId = result.lastInsertRowid;
+      for (const [i, p] of stored.entries()) {
+        await tx.run('INSERT INTO item_photos (item_id, filename, public_id, position) VALUES (?, ?, ?, ?)', [itemId, p.filename, p.publicId, i]);
+      }
       return itemId;
     });
     res.status(201).json({ id });
   } catch (err) {
-    removeFiles(files.map((f) => f.filename));
+    await removePhotos(stored);
     throw err;
   }
 });
 
-app.patch('/api/items/:id', auth(true), (req, res) => {
+app.patch('/api/items/:id', auth(true), async (req, res) => {
   const id = idParam(req.params.id);
-  getOwnedItem(id, req.user);
+  await getOwnedItem(id, req.user);
   const body = req.body ?? {};
   const updates = {};
   if ('status' in body) updates.status = oneOf(body.status, STATUS_IDS, 'Estado de la publicación');
@@ -468,120 +469,115 @@ app.patch('/api/items/:id', auth(true), (req, res) => {
   if ('swap' in body) updates.swap = parseBool(body.swap);
   const keys = Object.keys(updates);
   if (keys.length === 0) fail(400, 'No hay cambios para guardar');
-  db.prepare(`UPDATE items SET ${keys.map((k) => `${k} = ?`).join(', ')} WHERE id = ?`).run(...keys.map((k) => updates[k]), id);
+  await run(`UPDATE items SET ${keys.map((k) => `${k} = ?`).join(', ')} WHERE id = ?`, [...keys.map((k) => updates[k]), id]);
   res.json({ ok: true, ...updates });
 });
 
 // Denunciar una publicación (las tiendas exigen un mecanismo para contenido inapropiado)
 const REPORT_REASONS = new Set(['estafa', 'prohibido', 'ofensivo', 'spam', 'otro']);
-app.post('/api/items/:id/report', auth(true), reportLimit, (req, res) => {
+app.post('/api/items/:id/report', auth(true), reportLimit, async (req, res) => {
   const id = idParam(req.params.id);
-  if (!db.prepare('SELECT 1 FROM items WHERE id = ?').get(id)) fail(404, 'Esta publicación no existe');
+  if (!(await get('SELECT 1 FROM items WHERE id = ?', [id]))) fail(404, 'Esta publicación no existe');
   const reason = oneOf(req.body?.reason, REPORT_REASONS, 'Motivo');
   const detail = text(req.body?.detail, { field: 'Detalle', max: 500 });
-  if (db.prepare('SELECT 1 FROM reports WHERE item_id = ? AND user_id = ?').get(id, req.user.id)) {
+  if (await get('SELECT 1 FROM reports WHERE item_id = ? AND user_id = ?', [id, req.user.id])) {
     return res.json({ ok: true, already: true });
   }
-  db.prepare('INSERT INTO reports (item_id, user_id, reason, detail, created_at) VALUES (?, ?, ?, ?, ?)').run(id, req.user.id, reason, detail, now());
+  await run('INSERT INTO reports (item_id, user_id, reason, detail, created_at) VALUES (?, ?, ?, ?, ?)', [id, req.user.id, reason, detail, now()]);
   res.status(201).json({ ok: true });
 });
 
-app.delete('/api/items/:id', auth(true), (req, res) => {
+app.delete('/api/items/:id', auth(true), async (req, res) => {
   const id = idParam(req.params.id);
-  getOwnedItem(id, req.user);
-  const photos = db.prepare('SELECT filename FROM item_photos WHERE item_id = ?').all(id);
-  db.prepare('DELETE FROM items WHERE id = ?').run(id);
-  removeFiles(photos.map((p) => p.filename));
+  await getOwnedItem(id, req.user);
+  const photos = await itemPhotos(id);
+  await transaction((tx) => deleteItemRows(tx, id));
+  await removePhotos(photos);
   res.status(204).end();
 });
 
 // --- favoritos
 
-app.post('/api/items/:id/favorite', auth(true), (req, res) => {
+app.post('/api/items/:id/favorite', auth(true), async (req, res) => {
   const id = idParam(req.params.id);
-  if (!db.prepare('SELECT 1 FROM items WHERE id = ?').get(id)) fail(404, 'Esta publicación no existe');
-  const exists = db.prepare('SELECT 1 FROM favorites WHERE user_id = ? AND item_id = ?').get(req.user.id, id);
-  if (exists) db.prepare('DELETE FROM favorites WHERE user_id = ? AND item_id = ?').run(req.user.id, id);
-  else db.prepare('INSERT INTO favorites (user_id, item_id, created_at) VALUES (?, ?, ?)').run(req.user.id, id, now());
-  const { n } = db.prepare('SELECT COUNT(*) AS n FROM favorites WHERE item_id = ?').get(id);
+  if (!(await get('SELECT 1 FROM items WHERE id = ?', [id]))) fail(404, 'Esta publicación no existe');
+  const exists = await get('SELECT 1 FROM favorites WHERE user_id = ? AND item_id = ?', [req.user.id, id]);
+  if (exists) await run('DELETE FROM favorites WHERE user_id = ? AND item_id = ?', [req.user.id, id]);
+  else await run('INSERT INTO favorites (user_id, item_id, created_at) VALUES (?, ?, ?)', [req.user.id, id, now()]);
+  const { n } = await get('SELECT COUNT(*) AS n FROM favorites WHERE item_id = ?', [id]);
   res.json({ isFavorite: !exists, favorites: n });
 });
 
-app.get('/api/favorites', auth(true), (req, res) => {
-  const rows = db
-    .prepare(`${LIST_SELECT} JOIN favorites fv ON fv.item_id = i.id AND fv.user_id = ? ORDER BY fv.created_at DESC`)
-    .all(req.user.id);
-  res.json({ items: toListItems(rows, req.user) });
+app.get('/api/favorites', auth(true), async (req, res) => {
+  const rows = await all(`${LIST_SELECT} JOIN favorites fv ON fv.item_id = i.id AND fv.user_id = ? ORDER BY fv.created_at DESC`, [req.user.id]);
+  res.json({ items: await toListItems(rows, req.user) });
 });
 
 // --- perfiles
 
-app.get('/api/users/:id', (req, res) => {
+app.get('/api/users/:id', async (req, res) => {
   const id = idParam(req.params.id);
-  const user = db.prepare('SELECT * FROM users WHERE id = ?').get(id);
+  const user = await get('SELECT * FROM users WHERE id = ?', [id]);
   if (!user) fail(404, 'Este usuario no existe');
-  const stats = db
-    .prepare(
-      `SELECT COUNT(*) AS total, SUM(CASE WHEN status = 'sold' THEN 1 ELSE 0 END) AS sold FROM items WHERE user_id = ?`
-    )
-    .get(id);
+  const stats = await get(
+    `SELECT COUNT(*) AS total, SUM(CASE WHEN status = 'sold' THEN 1 ELSE 0 END) AS sold FROM items WHERE user_id = ?`,
+    [id]
+  );
   res.json({ user: { ...publicUser(user), itemCount: stats.total, soldCount: stats.sold ?? 0 } });
 });
 
 // --- mensajes
 
-function addMessage(conversationId, senderId, body) {
+async function addMessage(conn, conversationId, senderId, body) {
   const t = now();
-  const result = db
-    .prepare('INSERT INTO messages (conversation_id, sender_id, body, created_at) VALUES (?, ?, ?, ?)')
-    .run(conversationId, senderId, body, t);
-  db.prepare('UPDATE conversations SET updated_at = ? WHERE id = ?').run(t, conversationId);
-  return { id: Number(result.lastInsertRowid), mine: true, body, createdAt: t, read: false };
+  const result = await conn.run('INSERT INTO messages (conversation_id, sender_id, body, created_at) VALUES (?, ?, ?, ?)', [conversationId, senderId, body, t]);
+  await conn.run('UPDATE conversations SET updated_at = ? WHERE id = ?', [t, conversationId]);
+  return { id: result.lastInsertRowid, mine: true, body, createdAt: t, read: false };
 }
 
-function getConversation(id, user) {
-  const conv = db.prepare('SELECT * FROM conversations WHERE id = ?').get(id);
+async function getConversation(id, user) {
+  const conv = await get('SELECT * FROM conversations WHERE id = ?', [id]);
   if (!conv || (conv.buyer_id !== user.id && conv.seller_id !== user.id)) fail(404, 'Conversación no encontrada');
   return conv;
 }
 
-app.post('/api/items/:id/conversations', auth(true), (req, res) => {
+app.post('/api/items/:id/conversations', auth(true), async (req, res) => {
   const itemId = idParam(req.params.id);
-  const item = db.prepare('SELECT id, user_id, status FROM items WHERE id = ?').get(itemId);
+  const item = await get('SELECT id, user_id, status FROM items WHERE id = ?', [itemId]);
   if (!item) fail(404, 'Esta publicación no existe');
   if (item.user_id === req.user.id) fail(400, 'No podés enviarte mensajes a vos mismo');
   const body = text(req.body?.body, { field: 'Mensaje', min: 1, max: 1000, required: true });
 
-  const conversationId = transaction(() => {
+  const conversationId = await transaction(async (tx) => {
     const t = now();
-    db.prepare(
+    await tx.run(
       `INSERT INTO conversations (item_id, buyer_id, seller_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?)
-       ON CONFLICT (item_id, buyer_id) DO NOTHING`
-    ).run(item.id, req.user.id, item.user_id, t, t);
-    const conv = db.prepare('SELECT id FROM conversations WHERE item_id = ? AND buyer_id = ?').get(item.id, req.user.id);
-    addMessage(conv.id, req.user.id, body);
+       ON CONFLICT (item_id, buyer_id) DO NOTHING`,
+      [item.id, req.user.id, item.user_id, t, t]
+    );
+    const conv = await tx.get('SELECT id FROM conversations WHERE item_id = ? AND buyer_id = ?', [item.id, req.user.id]);
+    await addMessage(tx, conv.id, req.user.id, body);
     return conv.id;
   });
   res.status(201).json({ id: conversationId });
 });
 
-app.get('/api/conversations', auth(true), (req, res) => {
+app.get('/api/conversations', auth(true), async (req, res) => {
   const uid = req.user.id;
-  const rows = db
-    .prepare(
-      `SELECT c.id, c.item_id, c.updated_at, i.title AS item_title, i.price AS item_price, i.status AS item_status,
-         (SELECT filename FROM item_photos p WHERE p.item_id = c.item_id ORDER BY position LIMIT 1) AS cover,
-         o.id AS other_id, o.name AS other_name,
-         (SELECT body FROM messages m WHERE m.conversation_id = c.id ORDER BY m.id DESC LIMIT 1) AS last_body,
-         (SELECT sender_id FROM messages m WHERE m.conversation_id = c.id ORDER BY m.id DESC LIMIT 1) AS last_sender,
-         (SELECT COUNT(*) FROM messages m WHERE m.conversation_id = c.id AND m.sender_id <> ? AND m.read_at IS NULL) AS unread
-       FROM conversations c
-       JOIN items i ON i.id = c.item_id
-       JOIN users o ON o.id = CASE WHEN c.buyer_id = ? THEN c.seller_id ELSE c.buyer_id END
-       WHERE c.buyer_id = ? OR c.seller_id = ?
-       ORDER BY c.updated_at DESC`
-    )
-    .all(uid, uid, uid, uid);
+  const rows = await all(
+    `SELECT c.id, c.item_id, c.updated_at, i.title AS item_title, i.price AS item_price, i.status AS item_status,
+       (SELECT filename FROM item_photos p WHERE p.item_id = c.item_id ORDER BY position LIMIT 1) AS cover,
+       o.id AS other_id, o.name AS other_name,
+       (SELECT body FROM messages m WHERE m.conversation_id = c.id ORDER BY m.id DESC LIMIT 1) AS last_body,
+       (SELECT sender_id FROM messages m WHERE m.conversation_id = c.id ORDER BY m.id DESC LIMIT 1) AS last_sender,
+       (SELECT COUNT(*) FROM messages m WHERE m.conversation_id = c.id AND m.sender_id <> ? AND m.read_at IS NULL) AS unread
+     FROM conversations c
+     JOIN items i ON i.id = c.item_id
+     JOIN users o ON o.id = CASE WHEN c.buyer_id = ? THEN c.seller_id ELSE c.buyer_id END
+     WHERE c.buyer_id = ? OR c.seller_id = ?
+     ORDER BY c.updated_at DESC`,
+    [uid, uid, uid, uid]
+  );
   res.json({
     conversations: rows.map((r) => ({
       id: r.id,
@@ -595,16 +591,16 @@ app.get('/api/conversations', auth(true), (req, res) => {
   });
 });
 
-app.get('/api/conversations/:id', auth(true), (req, res) => {
-  const conv = getConversation(idParam(req.params.id), req.user);
+app.get('/api/conversations/:id', auth(true), async (req, res) => {
+  const conv = await getConversation(idParam(req.params.id), req.user);
   const uid = req.user.id;
-  db.prepare('UPDATE messages SET read_at = ? WHERE conversation_id = ? AND sender_id <> ? AND read_at IS NULL').run(now(), conv.id, uid);
+  await run('UPDATE messages SET read_at = ? WHERE conversation_id = ? AND sender_id <> ? AND read_at IS NULL', [now(), conv.id, uid]);
 
-  const item = db.prepare('SELECT id, title, price, status FROM items WHERE id = ?').get(conv.item_id);
-  const cover = db.prepare('SELECT filename FROM item_photos WHERE item_id = ? ORDER BY position LIMIT 1').get(conv.item_id);
+  const item = await get('SELECT id, title, price, status FROM items WHERE id = ?', [conv.item_id]);
+  const cover = await get('SELECT filename FROM item_photos WHERE item_id = ? ORDER BY position LIMIT 1', [conv.item_id]);
   const otherId = conv.buyer_id === uid ? conv.seller_id : conv.buyer_id;
-  const other = db.prepare('SELECT * FROM users WHERE id = ?').get(otherId);
-  const messages = db.prepare('SELECT * FROM messages WHERE conversation_id = ? ORDER BY id').all(conv.id);
+  const other = await get('SELECT * FROM users WHERE id = ?', [otherId]);
+  const messages = await all('SELECT * FROM messages WHERE conversation_id = ? ORDER BY id', [conv.id]);
 
   res.json({
     id: conv.id,
@@ -621,10 +617,10 @@ app.get('/api/conversations/:id', auth(true), (req, res) => {
   });
 });
 
-app.post('/api/conversations/:id/messages', auth(true), (req, res) => {
-  const conv = getConversation(idParam(req.params.id), req.user);
+app.post('/api/conversations/:id/messages', auth(true), async (req, res) => {
+  const conv = await getConversation(idParam(req.params.id), req.user);
   const body = text(req.body?.body, { field: 'Mensaje', min: 1, max: 1000, required: true });
-  res.status(201).json(addMessage(conv.id, req.user.id, body));
+  res.status(201).json(await addMessage({ run }, conv.id, req.user.id, body));
 });
 
 app.use('/api', (req, res) => res.status(404).json({ error: 'Ruta no encontrada' }));
@@ -638,12 +634,13 @@ if (fs.existsSync(CLIENT_DIST)) {
   app.use(express.static(CLIENT_DIST, { index: false }));
 
   // Vista previa (Open Graph) cuando se comparte un artículo en WhatsApp, Facebook, etc.
-  app.get('/articulo/:id', (req, res, next) => {
+  app.get('/articulo/:id', async (req, res, next) => {
     const id = parseInt(req.params.id, 10);
-    const item = id > 0 ? db.prepare('SELECT id, title, price, description FROM items WHERE id = ?').get(id) : null;
+    const item = id > 0 ? await get('SELECT id, title, price, description FROM items WHERE id = ?', [id]) : null;
     if (!item) return next();
-    const cover = db.prepare('SELECT filename FROM item_photos WHERE item_id = ? ORDER BY position LIMIT 1').get(id);
+    const cover = await get('SELECT filename FROM item_photos WHERE item_id = ? ORDER BY position LIMIT 1', [id]);
     const base = `${req.protocol}://${req.get('host')}`;
+    const image = cover ? photoUrl(cover.filename) : null;
     const description = (item.description || 'Mirá esta publicación en PasalO.').slice(0, 160);
     const tags = [
       `<meta property="og:type" content="product" />`,
@@ -651,8 +648,8 @@ if (fs.existsSync(CLIENT_DIST)) {
       `<meta property="og:title" content="${escapeHtml(item.title)} · Gs. ${item.price.toLocaleString('es-PY')}" />`,
       `<meta property="og:description" content="${escapeHtml(description)}" />`,
       `<meta property="og:url" content="${base}/articulo/${item.id}" />`,
-      cover ? `<meta property="og:image" content="${base}${photoUrl(cover.filename)}" />` : '',
-      `<meta name="twitter:card" content="${cover ? 'summary_large_image' : 'summary'}" />`,
+      image ? `<meta property="og:image" content="${/^https?:/.test(image) ? image : base + image}" />` : '',
+      `<meta name="twitter:card" content="${image ? 'summary_large_image' : 'summary'}" />`,
     ]
       .filter(Boolean)
       .join('\n    ');
@@ -683,5 +680,6 @@ app.use((err, req, res, next) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`API de pasalo escuchando en http://localhost:${PORT}`);
+  console.log(`API de PasalO escuchando en http://localhost:${PORT}`);
+  console.log(`Base de datos: ${process.env.DB_URL ? 'Turso' : 'archivo local'} · Fotos: ${USE_CLOUDINARY ? 'Cloudinary' : 'disco local'}`);
 });

@@ -1,17 +1,48 @@
-// Base de datos SQLite usando el módulo integrado de Node (sin dependencias nativas)
-import { DatabaseSync } from 'node:sqlite';
+// Base de datos SQLite vía libsql: un archivo local en desarrollo, o Turso en la nube
+// (gratis) cuando están definidas DB_URL y DB_AUTH_TOKEN.
+import { createClient } from '@libsql/client';
 import fs from 'node:fs';
 import path from 'node:path';
 
 const DATA_DIR = path.join(import.meta.dirname, 'data');
-fs.mkdirSync(DATA_DIR, { recursive: true });
+const DB_FILE = process.env.DB_FILE || path.join(DATA_DIR, 'cheropero.db');
+const REMOTE = Boolean(process.env.DB_URL);
 
-export const db = new DatabaseSync(process.env.DB_FILE || path.join(DATA_DIR, 'cheropero.db'));
+if (!REMOTE) fs.mkdirSync(path.dirname(DB_FILE), { recursive: true });
 
-db.exec(`
-  PRAGMA journal_mode = WAL;
-  PRAGMA foreign_keys = ON;
+export const db = createClient(
+  REMOTE
+    ? { url: process.env.DB_URL, authToken: process.env.DB_AUTH_TOKEN }
+    : { url: `file:${DB_FILE.replace(/\\/g, '/')}` }
+);
 
+// Atajos: get (una fila), all (varias), run (escritura). `conn` puede ser db o una transacción.
+export const get = async (sql, args = [], conn = db) => (await conn.execute({ sql, args })).rows[0];
+export const all = async (sql, args = [], conn = db) => (await conn.execute({ sql, args })).rows;
+export const run = async (sql, args = [], conn = db) => {
+  const r = await conn.execute({ sql, args });
+  return { lastInsertRowid: Number(r.lastInsertRowid), changes: r.rowsAffected };
+};
+
+// Ejecuta fn(tx) dentro de una transacción; tx tiene get/all/run propios.
+export async function transaction(fn) {
+  const t = await db.transaction('write');
+  try {
+    const tx = {
+      get: (sql, args) => get(sql, args, t),
+      all: (sql, args) => all(sql, args, t),
+      run: (sql, args) => run(sql, args, t),
+    };
+    const result = await fn(tx);
+    await t.commit();
+    return result;
+  } catch (err) {
+    await t.rollback();
+    throw err;
+  }
+}
+
+const SCHEMA = `
   CREATE TABLE IF NOT EXISTS users (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     name          TEXT NOT NULL,
@@ -48,10 +79,11 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_items_user ON items(user_id);
 
   CREATE TABLE IF NOT EXISTS item_photos (
-    id       INTEGER PRIMARY KEY AUTOINCREMENT,
-    item_id  INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
-    filename TEXT NOT NULL,
-    position INTEGER NOT NULL DEFAULT 0
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    item_id   INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+    filename  TEXT NOT NULL,
+    public_id TEXT NOT NULL DEFAULT '',
+    position  INTEGER NOT NULL DEFAULT 0
   );
   CREATE INDEX IF NOT EXISTS idx_photos_item ON item_photos(item_id);
 
@@ -90,20 +122,19 @@ db.exec(`
     detail     TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL
   );
-`);
+`;
 
-// Migraciones para bases creadas antes de que existiera cada columna
-const itemColumns = db.prepare('PRAGMA table_info(items)').all().map((c) => c.name);
-if (!itemColumns.includes('swap')) db.exec('ALTER TABLE items ADD COLUMN swap INTEGER NOT NULL DEFAULT 0');
+async function init() {
+  if (!REMOTE) await db.execute('PRAGMA journal_mode = WAL');
+  await db.executeMultiple(SCHEMA);
 
-export function transaction(fn) {
-  db.exec('BEGIN');
-  try {
-    const result = fn();
-    db.exec('COMMIT');
-    return result;
-  } catch (err) {
-    db.exec('ROLLBACK');
-    throw err;
+  // Migraciones para bases creadas antes de que existiera cada columna
+  const columns = async (table) => (await all(`PRAGMA table_info(${table})`)).map((c) => c.name);
+  if (!(await columns('items')).includes('swap')) await db.execute('ALTER TABLE items ADD COLUMN swap INTEGER NOT NULL DEFAULT 0');
+  if (!(await columns('item_photos')).includes('public_id')) {
+    await db.execute("ALTER TABLE item_photos ADD COLUMN public_id TEXT NOT NULL DEFAULT ''");
   }
 }
+
+// Esperar `ready` antes de atender peticiones
+export const ready = init();

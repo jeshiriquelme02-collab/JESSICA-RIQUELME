@@ -1,14 +1,12 @@
 // Carga usuarios y publicaciones de ejemplo. Uso: npm run seed
 // Contraseña de todas las cuentas demo: demo1234
 import crypto from 'node:crypto';
-import fs from 'node:fs';
-import path from 'node:path';
-import { db, transaction } from './db.js';
+import { get, ready, run, transaction } from './db.js';
+import { storePhotos } from './photos.js';
 
-const UPLOAD_DIR = path.join(import.meta.dirname, 'uploads');
-fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+await ready;
 
-if (db.prepare("SELECT 1 FROM users WHERE email LIKE '%@demo.test'").get()) {
+if (await get("SELECT 1 FROM users WHERE email LIKE '%@demo.test'")) {
   console.log('Los datos demo ya están cargados.');
   process.exit(0);
 }
@@ -47,28 +45,34 @@ function hashPassword(password) {
   return { hash: crypto.scryptSync(password, salt, 64).toString('hex'), salt };
 }
 
-transaction(() => {
-  const userIds = users.map((u, idx) => {
+// Las fotos se suben primero (Cloudinary o disco), después se insertan las filas
+const photos = [];
+for (const [, , , , , , , , emoji, from, to] of items) {
+  const [p] = await storePhotos([{ buffer: Buffer.from(svgPhoto(emoji, from, to)), mimetype: 'image/svg+xml' }]);
+  photos.push(p);
+}
+
+await transaction(async (tx) => {
+  const userIds = [];
+  for (const [idx, u] of users.entries()) {
     const { hash, salt } = hashPassword(PASSWORD);
     const created = new Date(Date.now() - (60 - idx) * 86400000).toISOString();
-    const r = db
-      .prepare('INSERT INTO users (name, email, password_hash, password_salt, city, phone, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
-      .run(u.name, u.email, hash, salt, u.city, u.phone, created);
-    return Number(r.lastInsertRowid);
-  });
+    const r = await tx.run(
+      'INSERT INTO users (name, email, password_hash, password_salt, city, phone, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      [u.name, u.email, hash, salt, u.city, u.phone, created]
+    );
+    userIds.push(r.lastInsertRowid);
+  }
 
-  items.forEach(([owner, title, description, price, category, condition, size, brand, emoji, from, to], idx) => {
+  for (const [idx, [owner, title, description, price, category, condition, size, brand]] of items.entries()) {
     const created = new Date(Date.now() - (items.length - idx) * 3 * 3600000).toISOString();
-    const r = db
-      .prepare(
-        `INSERT INTO items (user_id, title, description, price, category, condition, size, brand, city, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-      )
-      .run(userIds[owner], title, description, price, category, condition, size, brand, users[owner].city, created);
-    const filename = `demo-${crypto.randomUUID()}.svg`;
-    fs.writeFileSync(path.join(UPLOAD_DIR, filename), svgPhoto(emoji, from, to));
-    db.prepare('INSERT INTO item_photos (item_id, filename, position) VALUES (?, ?, 0)').run(Number(r.lastInsertRowid), filename);
-  });
+    const r = await tx.run(
+      `INSERT INTO items (user_id, title, description, price, category, condition, size, brand, city, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [userIds[owner], title, description, price, category, condition, size, brand, users[owner].city, created]
+    );
+    await tx.run('INSERT INTO item_photos (item_id, filename, public_id, position) VALUES (?, ?, ?, 0)', [r.lastInsertRowid, photos[idx].filename, photos[idx].publicId]);
+  }
 });
 
 console.log(`Listo: ${users.length} usuarios y ${items.length} publicaciones demo.`);

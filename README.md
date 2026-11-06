@@ -23,8 +23,8 @@ Marketplace de segunda mano para Paraguay, al estilo Vinted. Los usuarios se reg
 | Frontend | Vite + React 19 + React Router + íconos Lucide |
 | Diseño | Tipografías Bricolage Grotesque e Inter, modo oscuro automático |
 | Backend | Node.js + Express 5 |
-| Base de datos | SQLite integrado en Node (`node:sqlite`), sin instalar nada extra |
-| Fotos | Multer, guardadas en `server/uploads/` |
+| Base de datos | SQLite vía libsql: archivo local en desarrollo, Turso (gratis) en producción |
+| Fotos | En `server/uploads/` en desarrollo; Cloudinary (gratis) en producción |
 
 ## Cómo arrancarlo
 
@@ -84,15 +84,12 @@ Para agregar ciudades o categorías, editá `server/constants.js`.
 
 La misma web se empaqueta con Capacitor. Los proyectos nativos están en `client/android/` y `client/ios/`. Todos los pasos, requisitos de las tiendas y costos están en [STORES.md](STORES.md).
 
-## Antes de publicarlo en internet
+## Publicarlo en internet
 
-Esto funciona completo en tu computadora. Para abrirlo al público conviene sumar:
+Todos los pasos (Render + Turso + Cloudinary, gratis) están en [DEPLOY.md](DEPLOY.md).
 
-- **Hosting** con disco persistente para la base de datos y las fotos (por ejemplo un VPS, Railway o Render con volumen).
-- **HTTPS** y un dominio, por ejemplo `pasalo.com.py`.
-- **Recuperar contraseña** y verificación de email, que requieren un servicio de correo.
-- **Límite de intentos** de ingreso y de publicaciones, para frenar abusos.
-- **Moderación**: botón de "denunciar publicación" y un panel de administración.
-- **Fotos en la nube** (S3, Cloudflare R2) y compresión de imágenes, si va a haber mucho tráfico.
-- **Pagos en línea** (Bancard, Pagopar o similares), si querés cobrar dentro de la plataforma.
-- **Términos y condiciones** y política de privacidad.
+Ya incluido: límites anti-abuso, botón de denunciar, borrado de cuenta, términos y privacidad, vistas previas al compartir. Pendiente para más adelante:
+
+- **Recuperar contraseña** y verificación de email (requieren un servicio de correo).
+- **Panel de administración** para revisar denuncias y retirar publicaciones.
+- **Pagos en línea** (Bancard, Pagopar o similares), si algún día querés cobrar dentro de la plataforma.

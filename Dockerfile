@@ -16,7 +16,8 @@ RUN npm run build --prefix client
 
 ENV NODE_ENV=production
 ENV PORT=3001
-# Disco persistente: montar un volumen en /data y apuntar estas variables ahí
+# Sin DB_URL ni CLOUDINARY_URL, los datos van a /data: montar ahí un disco persistente.
+# Con Turso y Cloudinary (ver DEPLOY.md) no hace falta disco.
 ENV DB_FILE=/data/pasalo.db
 ENV UPLOAD_DIR=/data/uploads
 

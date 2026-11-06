@@ -11,6 +11,8 @@
     "seed": "node --disable-warning=ExperimentalWarning seed.js"
   },
   "dependencies": {
+    "@libsql/client": "^0.18.0",
+    "cloudinary": "^2.11.0",
     "express": "^5.1.0",
     "multer": "^2.0.2"
   }
