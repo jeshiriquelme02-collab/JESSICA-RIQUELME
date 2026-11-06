@@ -37,7 +37,7 @@ export default function Profile() {
             <h1>{profile.name}</h1>
             <div className="detail-tags">
               <FounderBadge user={profile} />
-              <span className="tag"><MapPin size={14} /> {profile.city}</span>
+              {profile.city && <span className="tag"><MapPin size={14} /> {profile.city}</span>}
               <span className="tag"><CalendarDays size={14} /> Desde {memberSince(profile.createdAt)}</span>
             </div>
           </div>

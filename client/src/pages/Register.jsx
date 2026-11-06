@@ -3,6 +3,7 @@ import { Link, Navigate, useNavigate, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../auth.jsx';
 import { safeNext } from './Login.jsx';
 import { Award } from 'lucide-react';
+import GoogleButton from '../components/GoogleButton.jsx';
 import Logo from '../components/Logo.jsx';
 
 export default function Register() {
@@ -45,6 +46,7 @@ export default function Register() {
           </div>
         </div>
       )}
+      <GoogleButton text="signup_with" onDone={() => navigate(next, { replace: true })} />
       <form className="form" onSubmit={submit}>
         <label className="field">
           <span>Nombre y apellido</span>

@@ -65,6 +65,7 @@ const SCHEMA = `
     password_salt TEXT NOT NULL,
     city          TEXT NOT NULL,
     phone         TEXT NOT NULL DEFAULT '',
+    google_sub    TEXT NOT NULL DEFAULT '',
     created_at    TEXT NOT NULL
   );
 
@@ -148,6 +149,9 @@ async function init() {
   if (!(await columns('items')).includes('swap')) await db.execute('ALTER TABLE items ADD COLUMN swap INTEGER NOT NULL DEFAULT 0');
   if (!(await columns('item_photos')).includes('public_id')) {
     await db.execute("ALTER TABLE item_photos ADD COLUMN public_id TEXT NOT NULL DEFAULT ''");
+  }
+  if (!(await columns('users')).includes('google_sub')) {
+    await db.execute("ALTER TABLE users ADD COLUMN google_sub TEXT NOT NULL DEFAULT ''");
   }
 }
 

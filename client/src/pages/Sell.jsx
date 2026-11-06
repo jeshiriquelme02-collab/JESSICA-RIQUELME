@@ -186,6 +186,7 @@ export default function Sell() {
             <label className="field">
               <span>Ciudad</span>
               <select value={form.city} onChange={set('city')} required>
+                <option value="" disabled>Elegí tu ciudad</option>
                 {meta?.cities.map((c) => (
                   <option key={c} value={c}>{c}</option>
                 ))}

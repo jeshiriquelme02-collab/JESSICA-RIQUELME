@@ -64,7 +64,8 @@ export default function Account() {
         </label>
         <label className="field">
           <span>Ciudad</span>
-          <select value={form.city} onChange={set('city')}>
+          <select value={form.city} onChange={set('city')} required>
+            <option value="" disabled>Elegí tu ciudad</option>
             {meta?.cities.map((c) => (
               <option key={c} value={c}>{c}</option>
             ))}

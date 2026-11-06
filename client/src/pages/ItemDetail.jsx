@@ -210,7 +210,7 @@ export default function ItemDetail() {
                 {item.seller.itemCount >= 3 && <BadgeCheck size={16} className="verified" aria-label="Vendedor activo" />}
               </strong>
               <span className="muted small">
-                {item.seller.city} · {item.seller.itemCount} publicaciones
+                {[item.seller.city, `${item.seller.itemCount} publicaciones`].filter(Boolean).join(' · ')}
               </span>
               <span className="muted small">En PasalO desde {memberSince(item.seller.createdAt)}</span>
               <FounderBadge user={item.seller} />

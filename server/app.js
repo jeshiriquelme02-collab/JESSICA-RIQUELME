@@ -1,4 +1,5 @@
 import express from 'express';
+import { createRemoteJWKSet, jwtVerify } from 'jose';
 import multer from 'multer';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -18,6 +19,10 @@ const CONDITION_IDS = new Set(CONDITIONS.map((c) => c.id));
 const STATUS_IDS = new Set(STATUSES.map((s) => s.id));
 const CITY_SET = new Set(CITIES);
 const IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
+
+// Ingreso con Google (opcional): el ID de cliente es público, no es una clave secreta
+const GOOGLE_CLIENT_ID = (process.env.GOOGLE_CLIENT_ID || '').trim();
+const googleKeys = createRemoteJWKSet(new URL('https://www.googleapis.com/oauth2/v3/certs'));
 
 // En Vercel no hay disco: sin estas claves no se puede guardar nada
 const MISSING_CONFIG = process.env.VERCEL ? ['DB_URL', 'DB_AUTH_TOKEN', 'CLOUDINARY_URL'].filter((k) => !process.env[k]) : [];
@@ -89,6 +94,7 @@ function hashPassword(password, salt = crypto.randomBytes(16).toString('hex')) {
 }
 
 function verifyPassword(password, salt, hash) {
+  if (!hash) return false; // cuentas creadas con Google, sin contraseña
   const candidate = crypto.scryptSync(password, salt, 64);
   const stored = Buffer.from(hash, 'hex');
   return stored.length === candidate.length && crypto.timingSafeEqual(candidate, stored);
@@ -293,6 +299,7 @@ app.get('/api/meta', async (req, res) => {
     maxPhotoMb: MAX_PHOTO_MB,
     founders: FOUNDERS,
     foundersLeft: await foundersLeft(),
+    googleClientId: GOOGLE_CLIENT_ID || null,
   });
 });
 
@@ -309,7 +316,9 @@ app.post('/api/auth/register', registerLimit, async (req, res) => {
   const city = oneOf(body.city, CITY_SET, 'Ciudad');
   const phone = normalizePhone(body.phone);
 
-  if (await get('SELECT 1 FROM users WHERE email = ?', [email])) fail(409, 'Ya existe una cuenta con ese email');
+  if (await get('SELECT 1 FROM users WHERE email = ?', [email])) {
+    fail(409, 'Ya existe una cuenta con ese email. Ingresá con tu contraseña o con Google.');
+  }
 
   const { hash, salt } = hashPassword(password);
   const result = await run(
@@ -324,10 +333,48 @@ app.post('/api/auth/login', loginLimit, async (req, res) => {
   const email = String(req.body?.email ?? '').trim().toLowerCase();
   const password = String(req.body?.password ?? '');
   const user = await get('SELECT * FROM users WHERE email = ?', [email]);
+  if (user && !user.password_hash && user.google_sub) fail(401, 'Esta cuenta entra con Google. Tocá "Continuar con Google".');
   if (!user || !verifyPassword(password, user.password_salt, user.password_hash)) {
     fail(401, 'Email o contraseña incorrectos');
   }
   res.json({ token: await createSession(user.id), user: selfUser(user) });
+});
+
+// "Continuar con Google": el navegador recibe de Google una credencial firmada (JWT) y
+// acá se verifica la firma, que sea para nuestra app y que el correo esté verificado.
+// Si ya hay una cuenta con ese correo, se entra a esa; si no, se crea una sin contraseña.
+app.post('/api/auth/google', loginLimit, async (req, res) => {
+  if (!GOOGLE_CLIENT_ID) fail(400, 'El ingreso con Google todavía no está activado');
+  const credential = String(req.body?.credential ?? '');
+  if (!credential) fail(400, 'Falta la credencial de Google');
+
+  let payload;
+  try {
+    ({ payload } = await jwtVerify(credential, googleKeys, {
+      issuer: ['https://accounts.google.com', 'accounts.google.com'],
+      audience: GOOGLE_CLIENT_ID,
+    }));
+  } catch {
+    fail(401, 'No se pudo verificar tu cuenta de Google. Probá de nuevo.');
+  }
+  if (!payload.email || payload.email_verified !== true) fail(401, 'Tu correo de Google no está verificado');
+
+  const email = String(payload.email).toLowerCase();
+  let user = (await get('SELECT * FROM users WHERE google_sub = ?', [payload.sub])) ?? (await get('SELECT * FROM users WHERE email = ?', [email]));
+  let created = false;
+  if (user) {
+    if (!user.google_sub) await run('UPDATE users SET google_sub = ? WHERE id = ?', [payload.sub, user.id]);
+  } else {
+    // Sin contraseña (no se puede entrar con una vacía) y sin ciudad: se elige al publicar
+    const name = String(payload.name || email.split('@')[0]).trim().slice(0, 60);
+    const result = await run(
+      'INSERT INTO users (name, email, password_hash, password_salt, city, phone, google_sub, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+      [name, email, '', '', '', '', payload.sub, now()]
+    );
+    user = await get('SELECT * FROM users WHERE id = ?', [result.lastInsertRowid]);
+    created = true;
+  }
+  res.status(created ? 201 : 200).json({ token: await createSession(user.id), user: selfUser(user), created });
 });
 
 app.post('/api/auth/logout', auth(true), async (req, res) => {

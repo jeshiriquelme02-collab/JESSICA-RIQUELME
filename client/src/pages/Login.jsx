@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { Link, Navigate, useNavigate, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../auth.jsx';
+import GoogleButton from '../components/GoogleButton.jsx';
 import Logo from '../components/Logo.jsx';
 
 export function safeNext(params) {
@@ -38,6 +39,7 @@ export default function Login() {
       <Logo size={44} />
       <h1>Ingresar</h1>
       <p className="muted">¡Qué bueno verte de nuevo! ¿Algo nuevo para vender?</p>
+      <GoogleButton text="signin_with" onDone={() => navigate(next, { replace: true })} />
       <form className="form" onSubmit={submit}>
         <label className="field">
           <span>Email</span>

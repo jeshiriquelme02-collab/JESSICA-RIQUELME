@@ -46,6 +46,14 @@ export function AuthProvider({ children }) {
     return d.user;
   };
 
+  // Recibe la credencial que da el botón de Google; devuelve { user, created }
+  const loginWithGoogle = async (credential) => {
+    const d = await api('/auth/google', { method: 'POST', body: { credential } });
+    setToken(d.token);
+    setUser(d.user);
+    return d;
+  };
+
   const register = async (fields) => {
     const d = await api('/auth/register', { method: 'POST', body: fields });
     setToken(d.token);
@@ -61,10 +69,12 @@ export function AuthProvider({ children }) {
     }
     setToken(null);
     setUser(null);
+    // Que Google no la vuelva a hacer entrar sola apenas abra "Ingresar"
+    window.google?.accounts?.id?.disableAutoSelect?.();
   };
 
   return (
-    <AuthContext.Provider value={{ user, setUser, ready, meta, login, register, logout, unread, refreshUnread }}>
+    <AuthContext.Provider value={{ user, setUser, ready, meta, login, loginWithGoogle, register, logout, unread, refreshUnread }}>
       {children}
     </AuthContext.Provider>
   );
